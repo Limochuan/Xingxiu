@@ -121,7 +121,20 @@ def to_db_record(src: Dict[str, Any], date_str: str) -> Dict[str, Any]:
                 val = -1
             dst[FIELD_MAP[k]] = val
     dst["DATE_STR"] = date_str
-    dst["CREATE_TIME"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ==== 改成雅加达时间 ====
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Asia/Jakarta")
+    except Exception:
+        class _FixedTZ(dt.tzinfo):
+            def utcoffset(self, _): return dt.timedelta(hours=7)
+            def tzname(self, _): return "UTC+07"
+            def dst(self, _): return dt.timedelta(0)
+        tz = _FixedTZ()
+    dst["CREATE_TIME"] = dt.datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    # ======================
+
     return dst
 
 def upsert(records: List[Dict[str, Any]]) -> int:
