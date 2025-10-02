@@ -2,23 +2,38 @@ name: Fetch & Store Daily (JKT 01:30)
 
 on:
   schedule:
-    - cron: "30 18 * * *"  # UTC 18:30 == Asia/Jakarta 01:30 (next day)
-  workflow_dispatch: {}     # 手动触发方便调试
+    - cron: "30 18 * * *"   # UTC 18:30 == Asia/Jakarta 01:30
+  workflow_dispatch:
+    inputs:
+      DATE_OVERRIDE:
+        description: "YYYY-MM-DD; leave empty to auto use Jakarta yesterday"
+        required: false
+        default: ""
+
+concurrency:
+  group: daily-sync
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     env:
-      # 从仓库 Secrets 里取，先去 Settings -> Secrets and variables -> Actions 配置
-      API_BASE_URL: ${{ secrets.API_BASE_URL }}  # 建议设置为 http://119.47.88.14:81/admin/common/mechanical/ai_export
+      # 你的脚本真正所在路径 —— 如果你把脚本放在根目录，就改成 fetch_and_store_daily.py
+      SCRIPT_PATH: daily_sync/fetch_and_store_daily.py
+
+      # Secrets（在仓库 Settings -> Secrets and variables -> Actions 配置）
+      API_BASE_URL: ${{ secrets.API_BASE_URL }}
       DB_HOST:      ${{ secrets.DB_HOST }}
       DB_PORT:      ${{ secrets.DB_PORT }}
       DB_USER:      ${{ secrets.DB_USER }}
       DB_PASS:      ${{ secrets.DB_PASS }}
       DB_NAME:      ${{ secrets.DB_NAME }}
       DB_TABLE:     ${{ secrets.DB_TABLE }}
-      # 可选：手动覆盖日期（格式 YYYY-MM-DD）。如不设，脚本会按 Asia/Jakarta 自动取“昨天”
-      # DATE_OVERRIDE: "2025-10-02"
+
+      # 手动触发时可覆盖日期
+      DATE_OVERRIDE: ${{ inputs.DATE_OVERRIDE }}
 
     steps:
       - name: Checkout
@@ -28,12 +43,46 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif [ -f ../requirements.txt ]; then
+            pip install -r ../requirements.txt
+          else
+            echo "❌ requirements.txt not found at ./ or ../"; exit 1
+          fi
 
-      - name: Run job
+      - name: Ensure script exists
         run: |
-          python fetch_and_store_daily.py
+          if [ ! -f "$SCRIPT_PATH" ]; then
+            echo "❌ SCRIPT_PATH not found: $SCRIPT_PATH"
+            echo "   请确认脚本路径是否为 daily_sync/fetch_and_store_daily.py 或修改 env.SCRIPT_PATH"
+            exit 1
+          fi
+          echo "✅ Found script: $SCRIPT_PATH"
+
+      - name: Run job with retry
+        shell: bash
+        run: |
+          set -e
+          ATTEMPTS=3
+          DELAY=20
+          for (( i=1; i<=ATTEMPTS; i++ )); do
+            echo "[INFO] Attempt $i/${ATTEMPTS}"
+            python "$SCRIPT_PATH" && SUCCESS=1 || SUCCESS=0
+            if [ "$SUCCESS" -eq 1 ]; then
+              echo "[INFO] Job succeeded on attempt $i"
+              exit 0
+            fi
+            if [ "$i" -lt "$ATTEMPTS" ]; then
+              echo "[WARN] Attempt $i failed. Sleeping ${DELAY}s then retry..."
+              sleep ${DELAY}
+              DELAY=$((DELAY*2))
+            fi
+          done
+          echo "[ERROR] All attempts failed."
+          exit 1
