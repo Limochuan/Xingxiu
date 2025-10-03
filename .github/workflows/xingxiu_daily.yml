@@ -2,14 +2,14 @@ name: Daily Sync (Jakarta 02:00)
 
 on:
   schedule:
-    # 02:00 Asia/Jakarta = 19:00 UTC (前一日)
-    - cron: "0 19 * * *"
+    - cron: "0 19 * * *"   # 02:00 Asia/Jakarta
   workflow_dispatch:
     inputs:
       date:
-        description: "Target date (YYYY-MM-DD) in Asia/Jakarta; leave empty to use 'yesterday' (JKT)"
+        description: "Target date (YYYY-MM-DD) in Asia/Jakarta; leave empty to use JKT 'yesterday'"
         required: false
         type: string
+        default: ""
 
 permissions:
   contents: read
@@ -23,31 +23,26 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # 手动触发时的日期输入（传给两个脚本）。
       DATE_STR: ${{ github.event.inputs.date }}
 
-      # 表名（如有变动在此处调整）
       DEVICE_TABLE: xingxiu_device_info
-      DAILY_TABLE: xingxiu_daily
+      DAILY_TABLE:  xingxiu_daily
       REPORT_TABLE: xingxiu_daily_report
 
-      # 数据库连接（务必用 Secrets 配置）
       DB_HOST: ${{ secrets.DB_HOST }}
       DB_PORT: ${{ secrets.DB_PORT }}
       DB_USER: ${{ secrets.DB_USER }}
       DB_PASS: ${{ secrets.DB_PASS }}
       DB_NAME: ${{ secrets.DB_NAME }}
 
-      # 如果 fetch 脚本需要额外的接口信息，在此加（示例）
-      API_BASE: ${{ secrets.API_BASE }}
-      API_KEY: ${{ secrets.API_KEY }}
+      # ✅ 关键修正：脚本需要 API_BASE
+      API_BASE:     ${{ secrets.API_BASE_URL }}
+      API_BASE_URL: ${{ secrets.API_BASE_URL }}  # 可选保留
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -57,19 +52,16 @@ jobs:
           pip install -r requirements.txt
 
       - name: Fetch daily data into DB
-        run: |
-          python daily_sync/fetch_and_store_daily.py
+        run: python daily_sync/fetch_and_store_daily.py
 
       - name: Merge daily into business report
-        run: |
-          python daily_sync/merge_daily_to_report_upsert.py
+        run: python daily_sync/merge_daily_to_report_upsert.py
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daily-sync-logs
-          path: |
-            merge_daily.log
+          path: merge_daily.log
           if-no-files-found: ignore
           retention-days: 7
