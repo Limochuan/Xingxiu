@@ -1,0 +1,65 @@
+name: Xingxiu Daily Report Merge
+
+on:
+  schedule:
+    # 02:00 Asia/Jakarta = 19:00 UTC（前一日）
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Target date (YYYY-MM-DD) in Asia/Jakarta; leave blank to run previous day at 02:00 JKT"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xingxiu-daily-report
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    env:
+      # 将 workflow_dispatch 的输入传给脚本（脚本内部若为空会自动取雅加达前一天）
+      DATE_STR: ${{ github.event.inputs.date }}
+
+      # 表名（如需调整可在这里改）
+      DEVICE_TABLE: xingxiu_device_info
+      DAILY_TABLE: xingxiu_daily
+      REPORT_TABLE: xingxiu_daily_report
+
+      # DB 连接（务必使用仓库 Secrets 配置这些敏感信息）
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+    steps:
+      - name: Checkout
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pymysql tzdata
+
+      - name: Run merge script
+        run: |
+          python scripts/merge_daily_to_report_upsert.py
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: merge-daily-log
+          path: merge_daily.log
+          if-no-files-found: ignore
+          retention-days: 7
