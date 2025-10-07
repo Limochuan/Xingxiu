@@ -17,7 +17,7 @@ from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # =========================
-# 配置（优先读环境变量，给默认值）
+# 配置（优先读环境变量）
 # =========================
 DB_HOST = os.getenv("DB_HOST", "rm-k1a5w7qk9cnm74r25wo.mysql.ap-southeast-5.rds.aliyuncs.com")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
@@ -28,11 +28,10 @@ DB_TABLE = os.getenv("DB_TABLE", "xingxiu_daily_report")
 
 DEFAULT_PROJECT = "Kalteng GIJ 中加一园"
 
-# 尝试使用中文字体名；如果服务器没有该字体，也不影响生成（Excel 会回退）
 FONT_TITLE_NAME = "仿宋"
 FONT_BODY_NAME = "仿宋"
 
-app = FastAPI(title="Yaoguang Excel Download API", version="1.1.0")
+app = FastAPI(title="Yaoguang Excel Download API", version="3.0.0")
 
 
 # =========================
@@ -59,14 +58,6 @@ def parse_date_like(s: Optional[str]) -> Optional[dt.date]:
     return None
 
 def parse_date_range(raw: Optional[str]) -> Tuple[Optional[dt.date], Optional[dt.date]]:
-    """
-    兼容：
-    - "2025-10-01 到 2025-10-15"
-    - "2025-10-01 to 2025-10-15"
-    - "2025.10.01-2025.10.15"
-    - "2025/10/01—2025/10/15"
-    - 以及“2025--10-15”等异常连字符
-    """
     if not raw:
         return None, None
     s = raw.strip()
@@ -137,9 +128,14 @@ def build_where_and_params(
         single_day = (left == right)
 
     # 3) 维度过滤
+    #   如果没有显式传 PROJECT_NAME，则默认限定 GIJ
     if project_name:
         where.append("PROJECT_NAME = %s")
         params.append(project_name)
+    else:
+        where.append("PROJECT_NAME = %s")
+        params.append(DEFAULT_PROJECT)
+
     if company:
         where.append("COMPANY = %s")
         params.append(company)
@@ -153,7 +149,7 @@ def auto_select_columns(cursor, limit: int = 31) -> List[str]:
     return cols[:limit]
 
 def col_widths_spec() -> List[float]:
-    # A..AE 共 31 列
+    # A..AE 共 31 列（索引 1..31）
     return [
         9, 15, 28, 20, 23, 14, 14, 18, 18, 15, 12, 13, 13,
         21, 21, 13, 12, 15, 21, 20, 40, 18, 19, 16, 20, 13,
@@ -206,10 +202,10 @@ def make_excel(
     header_font = Font(name=FONT_BODY_NAME, size=10, bold=True)
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    headers = ordered_cols
-    for col_idx, col_name in enumerate(headers, start=1):
+    # 用 ordered_cols 填表头（两行：字段名 + 空行）
+    for col_idx, col_name in enumerate(ordered_cols, start=1):
         c = ws.cell(row=2, column=col_idx)
-        c.value = f"{col_name}\n"  # 两行
+        c.value = f"{col_name}\n"
         c.font = header_font
         c.alignment = header_align
 
@@ -223,28 +219,30 @@ def make_excel(
 
     for r_idx, row in enumerate(rows, start=3):
         ws.row_dimensions[r_idx].height = 40
-        for c_idx, col_name in enumerate(headers, start=1):
+        for c_idx, col_name in enumerate(ordered_cols, start=1):
             val = row.get(col_name, "")
             cell = ws.cell(row=r_idx, column=c_idx, value=val)
             cell.font = body_font
-            if c_idx == 29:  # AC 列顶端左对齐
+            # AC 列（第29列）从第3行开始顶端左对齐，其余居中
+            if c_idx == 29:
                 cell.alignment = top_left_align
             else:
                 cell.alignment = center_align
             cell.border = border_all
 
-    # 外层加粗边框
+    # —— 外层加粗边框（整个使用区域）——
     max_row = max(2, 2 + len(rows))
+    max_col = len(ordered_cols)
     for r in range(1, max_row + 1):
-        for c in range(1, len(headers) + 1):
+        for c in range(1, max_col + 1):
             cell = ws.cell(row=r, column=c)
             left = thick if c == 1 else cell.border.left
-            right = thick if c == len(headers) else cell.border.right
+            right = thick if c == max_col else cell.border.right
             top = thick if r == 1 else cell.border.top
             bottom = thick if r == max_row else cell.border.bottom
             cell.border = Border(left=left, right=right, top=top, bottom=bottom)
 
-    # Y 列（第25列）设为印尼卢比两位小数
+    # —— Y 列（第25列）设置印尼卢比两位小数 —— 
     currency_col = 25
     for r in range(3, max_row + 1):
         ws.cell(row=r, column=currency_col).number_format = 'Rp#,##0.00'
@@ -271,21 +269,11 @@ def download_excel(
     PROJECT_NAME: Optional[str] = Query(default=None),
     COMPANY: Optional[str] = Query(default=None),
 ):
-    # 构建 WHERE
+    # WHERE 及日期段信息
     where_sql, params, span, single_day = build_where_and_params(
         DATE_STR, DATE_FROM, DATE_TO, DATE_RANGE, PROJECT_NAME, COMPANY
     )
-
-    # ✅ 关键改动：如果用户没传 PROJECT_NAME，就默认限定到 GIJ
-    if not PROJECT_NAME:
-        if where_sql:
-            where_sql += " AND PROJECT_NAME = %s"
-        else:
-            where_sql = " WHERE PROJECT_NAME = %s"
-        params.append(DEFAULT_PROJECT)
-        project_for_title = DEFAULT_PROJECT
-    else:
-        project_for_title = PROJECT_NAME
+    project_for_title = PROJECT_NAME or DEFAULT_PROJECT
 
     sql = f"SELECT * FROM `{DB_TABLE}`{where_sql} ORDER BY DATE_STR ASC, ID ASC"
 
@@ -295,11 +283,8 @@ def download_excel(
             ordered_cols = auto_select_columns(cur, limit=31)
             cur.execute(sql, params)
             rows = cur.fetchall() or []
-
-            trimmed_rows: List[Dict[str, Any]] = []
-            for r in rows:
-                trimmed_rows.append({k: r.get(k, "") for k in ordered_cols})
-
+            # 仅保留前 31 列键值
+            trimmed_rows = [{k: r.get(k, "") for k in ordered_cols} for r in rows]
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"DB error: {e}"})
     finally:
@@ -308,7 +293,6 @@ def download_excel(
         except Exception:
             pass
 
-    # 没数据 → 更友好的提示
     if not trimmed_rows:
         return JSONResponse(status_code=404, content={"error": "No data found for given filters"})
 
@@ -321,17 +305,16 @@ def download_excel(
         single_day=single_day,
     )
 
-    # 文件名：PROJECT + 日期范围
+    # 生成文件名（支持中文，RFC5987）
     if span[0] and span[1]:
         date_tag = span[0].strftime("%Y%m%d") if single_day else f"{span[0].strftime('%Y%m%d')}-{span[1].strftime('%Y%m%d')}"
     else:
         date_tag = dt.datetime.now().strftime("%Y%m%d")
+
     safe_proj = re.sub(r"[\\/:*?\"<>|]+", "_", project_for_title)
     filename = f"{safe_proj}_AI_REPORT_{date_tag}.xlsx"
-
-    # ✅ 修复中文文件名下载（RFC5987）
-    ascii_fallback = re.sub(r"[^\x00-\x7F]+", "_", filename)  # 兜底
-    utf8_filename = quote(filename)  # URL 编码 UTF-8
+    ascii_fallback = re.sub(r"[^\x00-\x7F]+", "_", filename)
+    utf8_filename = quote(filename)
     headers = {
         "Content-Disposition": f"attachment; filename={ascii_fallback}; filename*=UTF-8''{utf8_filename}"
     }
