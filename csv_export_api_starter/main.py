@@ -27,7 +27,7 @@ DEFAULT_PROJECT = "Kalteng GIJ 中加一园"
 FONT_TITLE_NAME = "仿宋"
 FONT_BODY_NAME  = "仿宋"
 
-app = FastAPI(title="Yaoguang Excel Download API", version="1.2.3")
+app = FastAPI(title="Yaoguang Excel Download API", version="1.3.0")
 
 # =========================
 # 固定列定义（A..AE 共 31 列，顺序不可变）
@@ -57,15 +57,14 @@ COLUMN_SPECS = [
     ("ORDER_NO SAP",       "SAP订单号",    ["ORDER_NO SAP","ORDER_NO_SAP","ORDER_NO"]),
     ("PURCHASE_DATE",      "购买日期",     ["PURCHASE_DATE"]),
     ("DRIVER_COUNT",       "司机数量",     ["DRIVER_COUNT"]),
-    ("PURCH_PRICE",        "购买价格",     ["PURCH_PRICE","PURCHASE_PRICE"]),   # ← Y 列
+    ("PURCH_PRICE",        "购买价格",     ["PURCH_PRICE","PURCHASE_PRICE"]),   # ← Y 列 (25)
     ("FUEL_DIFF",          "标准油耗差",   ["FUEL_DIFF"]),
-    ("INSERT_TIME",        "数据插入时间", ["INSERT_TIME","CREATE_TIME"]),      # ← AA 列
+    ("INSERT_TIME",        "数据插入时间", ["INSERT_TIME","CREATE_TIME"]),      # ← AA 列 (27)
     ("SCORE",              "得分",         ["SCORE"]),
-    ("SUMMARY",            "AI分析",       ["SUMMARY"]),                        # ← AC 列
+    ("SUMMARY",            "AI分析",       ["SUMMARY"]),                        # ← AC 列 (29)
     ("ANALYSIS_TIME",      "分析时间",     ["ANALYSIS_TIME"]),
     ("MODEL_NAME",         "使用模型",     ["MODEL_NAME"]),
 ]
-
 FIELD_TO_COLIDX = {field: idx+1 for idx, (field, _, _) in enumerate(COLUMN_SPECS)}
 COLIDX_Y  = FIELD_TO_COLIDX["PURCH_PRICE"]   # 25
 COLIDX_AC = FIELD_TO_COLIDX["SUMMARY"]       # 29
@@ -110,34 +109,6 @@ def detect_date_span_from_rows(rows: List[Dict[str, Any]]) -> Tuple[Optional[dt.
             if d: dates.append(d)
     return (min(dates), max(dates)) if dates else (None, None)
 
-def build_where_and_params(date_str, date_from, date_to, date_range, project_name, company):
-    where, params = [], []
-    span = (None, None); single_day = False
-
-    d = parse_date_like(date_str) if date_str else None
-    if d:
-        where.append("DATE_STR = %s"); params.append(d.strftime("%Y-%m-%d"))
-        span = (d, d); single_day = True
-
-    left = parse_date_like(date_from) if date_from else None
-    right = parse_date_like(date_to) if date_to else None
-    if not (left and right) and date_range:
-        l2, r2 = parse_date_range(date_range)
-        left, right = left or l2, right or r2
-    if left and right:
-        where.append("DATE_STR BETWEEN %s AND %s")
-        params.extend([left.strftime("%Y-%m-%d"), right.strftime("%Y-%m-%d")])
-        span = (left, right); single_day = (left == right)
-
-    # 只有当传入了非空 project_name 时才加该条件（默认 GIJ 在外层统一处理）
-    if project_name:
-        where.append("PROJECT_NAME = %s"); params.append(project_name)
-
-    if company:
-        where.append("COMPANY = %s"); params.append(company)
-
-    return (" WHERE " + " AND ".join(where)) if where else "", params, span, single_day
-
 def col_widths_spec() -> List[float]:
     return [9,15,28,20,23,14,14,18,18,15,12,13,13,21,21,13,12,15,21,20,40,18,19,16,20,13,21,9,200,20,15]
 
@@ -164,7 +135,7 @@ def make_excel(rows: List[Dict[str, Any]], project_name_for_title: str,
     for idx, w in enumerate(col_widths_spec(), start=1):
         ws.column_dimensions[get_column_letter(idx)].width = w
 
-    # 第1行 标题
+    # 第1行 标题（三行）
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=31)
     if not (span[0] and span[1]) and rows:
         span = detect_date_span_from_rows(rows); single_day = (span[0] and span[1] and span[0]==span[1])
@@ -182,7 +153,7 @@ def make_excel(rows: List[Dict[str, Any]], project_name_for_title: str,
         c = ws.cell(row=2, column=col_idx, value=f"{field}\n{zh}")
         c.font = header_font; c.alignment = header_align
 
-    # 数据行
+    # 数据行（AC 顶左，其余居中；行高 40）
     body_font    = Font(name=FONT_BODY_NAME, size=10)
     center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     top_left     = Alignment(horizontal="left",   vertical="top",   wrap_text=True)
@@ -229,38 +200,48 @@ def healthz():
 
 @app.get("/download_excel")
 def download_excel(
-    DATE_STR: Optional[str] = Query(default=None),
-    DATE_FROM: Optional[str] = Query(default=None),
-    DATE_TO: Optional[str] = Query(default=None),
-    DATE_RANGE: Optional[str] = Query(default=None),
-    PROJECT_NAME: Optional[str] = Query(default=None),
-    COMPANY: Optional[str] = Query(default=None),
+    # 只保留“时间 + 项目”两个维度参数
+    DATE_STR: Optional[str] = Query(default=None, description="单日，例如 2025-10-05"),
+    DATE_FROM: Optional[str] = Query(default=None, description="起始日，例如 2025-10-01"),
+    DATE_TO: Optional[str]   = Query(default=None, description="结束日，例如 2025-10-07"),
+    DATE_RANGE: Optional[str]= Query(default=None, description="时间段，支持 '2025-10-01到2025-10-07'、'2025/10/01-2025/10/07' 等"),
+    PROJECT_NAME: Optional[str] = Query(default=None, description="项目名；不传则默认 Kalteng GIJ 中加一园"),
 ):
-    # —— 关键：参数规范化（空字符串 → None；去掉前后空格）
+    # —— 参数规范化
     PROJECT_NAME = (PROJECT_NAME.strip() or None) if PROJECT_NAME is not None else None
-    COMPANY      = (COMPANY.strip() or None) if COMPANY is not None else None
-    DATE_STR     = DATE_STR.strip() if DATE_STR else None
-    DATE_FROM    = DATE_FROM.strip() if DATE_FROM else None
-    DATE_TO      = DATE_TO.strip() if DATE_TO else None
-    DATE_RANGE   = DATE_RANGE.strip() if DATE_RANGE else None
+    DATE_STR   = DATE_STR.strip() if DATE_STR else None
+    DATE_FROM  = DATE_FROM.strip() if DATE_FROM else None
+    DATE_TO    = DATE_TO.strip() if DATE_TO else None
+    DATE_RANGE = DATE_RANGE.strip() if DATE_RANGE else None
 
-    # 构建 where
-    where_sql, params, span, single_day = build_where_and_params(
-        DATE_STR, DATE_FROM, DATE_TO, DATE_RANGE, PROJECT_NAME, COMPANY
-    )
+    # —— 时间必填：三种写法至少一种成立，否则 400
+    span = (None, None); single_day = False
+    where, params = [], []
 
-    # —— 默认 GIJ：只要没有“非空 PROJECT_NAME”，就强制限定 GIJ（无论是否有日期/公司条件）
-    if not PROJECT_NAME:
-        if where_sql:
-            where_sql += " AND PROJECT_NAME = %s"
-            params.append(DEFAULT_PROJECT)
-        else:
-            where_sql = " WHERE PROJECT_NAME = %s"
-            params = [DEFAULT_PROJECT]
-        project_for_title = DEFAULT_PROJECT
+    if DATE_STR:
+        d = parse_date_like(DATE_STR)
+        if not d:
+            return JSONResponse(status_code=400, content={"error": "DATE_STR 格式不合法，应为 YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD"})
+        where.append("DATE_STR = %s"); params.append(d.strftime("%Y-%m-%d"))
+        span, single_day = (d, d), True
     else:
-        project_for_title = PROJECT_NAME
+        left = parse_date_like(DATE_FROM) if DATE_FROM else None
+        right = parse_date_like(DATE_TO) if DATE_TO else None
+        if not (left and right) and DATE_RANGE:
+            l2, r2 = parse_date_range(DATE_RANGE)
+            left, right = left or l2, right or r2
+        if left and right:
+            where.append("DATE_STR BETWEEN %s AND %s")
+            params += [left.strftime("%Y-%m-%d"), right.strftime("%Y-%m-%d")]
+            span, single_day = (left, right), (left == right)
+        else:
+            return JSONResponse(status_code=400, content={"error": "时间必填：传 DATE_STR 或 DATE_FROM+DATE_TO 或 DATE_RANGE"})
 
+    # —— 项目：可选；不传则强制 GIJ
+    project_for_title = PROJECT_NAME or DEFAULT_PROJECT
+    where.append("PROJECT_NAME = %s"); params.append(project_for_title)
+
+    where_sql = " WHERE " + " AND ".join(where)
     sql = f"SELECT * FROM `{DB_TABLE}`{where_sql} ORDER BY DATE_STR ASC, ID ASC"
 
     try:
@@ -275,7 +256,7 @@ def download_excel(
         except Exception: pass
 
     if not rows:
-        return JSONResponse(status_code=404, content={"error": "No data found for given filters"})
+        return JSONResponse(status_code=404, content={"error": "没有匹配数据"})
 
     excel_bytes = make_excel(rows, project_for_title, span, single_day)
 
