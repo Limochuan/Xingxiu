@@ -27,12 +27,11 @@ DEFAULT_PROJECT = "Kalteng GIJ 中加一园"
 FONT_TITLE_NAME = "仿宋"
 FONT_BODY_NAME  = "仿宋"
 
-app = FastAPI(title="Yaoguang Excel Download API", version="1.2.2")
+app = FastAPI(title="Yaoguang Excel Download API", version="1.2.3")
 
 # =========================
 # 固定列定义（A..AE 共 31 列，顺序不可变）
 # (显示字段名, 中文, 取值别名列表)
-# 注意：这里“ORDER_NO SAP”是表头显示名，真实列名多半是 ORDER_NO_SAP —— 已在别名中兼容
 COLUMN_SPECS = [
     ("ID",                 "序号",         ["ID"]),
     ("DEVICE_ID",          "工时通编号",   ["DEVICE_ID"]),
@@ -60,17 +59,16 @@ COLUMN_SPECS = [
     ("DRIVER_COUNT",       "司机数量",     ["DRIVER_COUNT"]),
     ("PURCH_PRICE",        "购买价格",     ["PURCH_PRICE","PURCHASE_PRICE"]),   # ← Y 列
     ("FUEL_DIFF",          "标准油耗差",   ["FUEL_DIFF"]),
-    ("INSERT_TIME",        "数据插入时间", ["INSERT_TIME","CREATE_TIME"]),      # ← AA 列（仅作取值别名，表头始终显示 INSERT_TIME）
+    ("INSERT_TIME",        "数据插入时间", ["INSERT_TIME","CREATE_TIME"]),      # ← AA 列
     ("SCORE",              "得分",         ["SCORE"]),
     ("SUMMARY",            "AI分析",       ["SUMMARY"]),                        # ← AC 列
     ("ANALYSIS_TIME",      "分析时间",     ["ANALYSIS_TIME"]),
     ("MODEL_NAME",         "使用模型",     ["MODEL_NAME"]),
 ]
 
-# 便捷索引：按字段名得到列号（1起）
 FIELD_TO_COLIDX = {field: idx+1 for idx, (field, _, _) in enumerate(COLUMN_SPECS)}
-COLIDX_Y  = FIELD_TO_COLIDX["PURCH_PRICE"]         # 必须是 25
-COLIDX_AC = FIELD_TO_COLIDX["SUMMARY"]             # 必须是 29
+COLIDX_Y  = FIELD_TO_COLIDX["PURCH_PRICE"]   # 25
+COLIDX_AC = FIELD_TO_COLIDX["SUMMARY"]       # 29
 
 # =========================
 # 工具函数
@@ -131,8 +129,12 @@ def build_where_and_params(date_str, date_from, date_to, date_range, project_nam
         params.extend([left.strftime("%Y-%m-%d"), right.strftime("%Y-%m-%d")])
         span = (left, right); single_day = (left == right)
 
-    if project_name: where.append("PROJECT_NAME = %s"); params.append(project_name)
-    if company:      where.append("COMPANY = %s");      params.append(company)
+    # 只有当传入了非空 project_name 时才加该条件（默认 GIJ 在外层统一处理）
+    if project_name:
+        where.append("PROJECT_NAME = %s"); params.append(project_name)
+
+    if company:
+        where.append("COMPANY = %s"); params.append(company)
 
     return (" WHERE " + " AND ".join(where)) if where else "", params, span, single_day
 
@@ -149,7 +151,6 @@ def to_period_str(span: Tuple[Optional[dt.date], Optional[dt.date]], single_day:
 # Excel 渲染（严格按版式）
 # =========================
 def _first_present(row: Dict[str, Any], alts: list) -> Any:
-    """从 row 里按备选键取第一个存在的值"""
     for k in alts:
         if k in row and row[k] is not None:
             return row[k]
@@ -208,7 +209,7 @@ def make_excel(rows: List[Dict[str, Any]], project_name_for_title: str,
             bottom = thick if r == max_row else cell.border.bottom
             cell.border = Border(left=left, right=right, top=top, bottom=bottom)
 
-    # Y 列（确定性地按“字段名=PURCH_PRICE”的列号设置印尼卢比格式）
+    # Y 列（PURCH_PRICE）印尼卢比两位小数
     for r in range(3, max_row + 1):
         ws.cell(row=r, column=COLIDX_Y).number_format = 'Rp#,##0.00'
 
@@ -235,13 +236,30 @@ def download_excel(
     PROJECT_NAME: Optional[str] = Query(default=None),
     COMPANY: Optional[str] = Query(default=None),
 ):
-    project_for_title = PROJECT_NAME or DEFAULT_PROJECT
+    # —— 关键：参数规范化（空字符串 → None；去掉前后空格）
+    PROJECT_NAME = (PROJECT_NAME.strip() or None) if PROJECT_NAME is not None else None
+    COMPANY      = (COMPANY.strip() or None) if COMPANY is not None else None
+    DATE_STR     = DATE_STR.strip() if DATE_STR else None
+    DATE_FROM    = DATE_FROM.strip() if DATE_FROM else None
+    DATE_TO      = DATE_TO.strip() if DATE_TO else None
+    DATE_RANGE   = DATE_RANGE.strip() if DATE_RANGE else None
 
+    # 构建 where
     where_sql, params, span, single_day = build_where_and_params(
         DATE_STR, DATE_FROM, DATE_TO, DATE_RANGE, PROJECT_NAME, COMPANY
     )
-    if not where_sql:
-        where_sql = " WHERE PROJECT_NAME = %s"; params = [DEFAULT_PROJECT]
+
+    # —— 默认 GIJ：只要没有“非空 PROJECT_NAME”，就强制限定 GIJ（无论是否有日期/公司条件）
+    if not PROJECT_NAME:
+        if where_sql:
+            where_sql += " AND PROJECT_NAME = %s"
+            params.append(DEFAULT_PROJECT)
+        else:
+            where_sql = " WHERE PROJECT_NAME = %s"
+            params = [DEFAULT_PROJECT]
+        project_for_title = DEFAULT_PROJECT
+    else:
+        project_for_title = PROJECT_NAME
 
     sql = f"SELECT * FROM `{DB_TABLE}`{where_sql} ORDER BY DATE_STR ASC, ID ASC"
 
