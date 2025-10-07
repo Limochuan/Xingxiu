@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
-import io
-import re
-import datetime as dt
+import os, io, re, datetime as dt
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import quote
 
@@ -16,9 +13,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# =========================
-# 配置
-# =========================
+# ----------------- 配置 -----------------
 DB_HOST = os.getenv("DB_HOST", "rm-k1a5w7qk9cnm74r25wo.mysql.ap-southeast-5.rds.aliyuncs.com")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_USER = os.getenv("DB_USER", "script_xingxiu")
@@ -27,39 +22,68 @@ DB_NAME = os.getenv("DB_NAME", "xingxiu_db")
 DB_TABLE = os.getenv("DB_TABLE", "xingxiu_daily_report")
 
 DEFAULT_PROJECT = "Kalteng GIJ 中加一园"
-FONT_TITLE_NAME = "仿宋"   # 没装字体时，Excel 会自动回退
+FONT_TITLE_NAME = "仿宋"
 FONT_BODY_NAME = "仿宋"
 
-app = FastAPI(title="Yaoguang Excel Download API", version="1.1.0")
+app = FastAPI(title="Yaoguang Excel Download API", version="1.2.0")
 
+# 固定 31 列顺序 + 表头（两行：字段名/中文）
+# alt_keys 用于容错：遇到库里名称不同（如下划线/空格）时，按顺序取第一个存在的键
+COLUMN_SPECS = [
+    ("ID",                 "序号",       ["ID"]),
+    ("DEVICE_ID",          "工时通编号", ["DEVICE_ID"]),
+    ("PROJECT_NAME",       "系统项目名称", ["PROJECT_NAME"]),
+    ("MECHANICAL_NO",      "系统编号",   ["MECHANICAL_NO"]),
+    ("CAR_TYPE",           "系统类型",   ["CAR_TYPE"]),
+    ("DATE_STR",           "数据日期",   ["DATE_STR"]),
+    ("RENT_TYPE",          "系统计算类型", ["RENT_TYPE"]),
+    ("VALID_DURATION",     "有效工时",   ["VALID_DURATION"]),
+    ("IDLING_DURATION",    "怠速工时",   ["IDLING_DURATION"]),
+    ("VALID_PERCENT",      "工时有效比%", ["VALID_PERCENT"]),
+    ("DAY_OIL",            "油耗",       ["DAY_OIL"]),
+    ("DAY_REFUEL",         "加油",       ["DAY_REFUEL"]),
+    ("DAY_MILEAGE",        "里程",       ["DAY_MILEAGE"]),
+    ("WORKHOUR_AVG_OIL",   "工时平均油耗", ["WORKHOUR_AVG_OIL"]),
+    ("TRANSPORT_AVG_OIL",  "运输平均油耗", ["TRANSPORT_AVG_OIL"]),
+    ("COMPANY",            "公司",       ["COMPANY"]),
+    ("ESTATE",             "区域",       ["ESTATE"]),
+    ("MACHINE_TYPE",       "机械类型",   ["MACHINE_TYPE"]),
+    ("MACHINE_CATEGORY",   "机械具体类型", ["MACHINE_CATEGORY"]),
+    ("MACHINE_NO",         "园区编号",   ["MACHINE_NO"]),
+    ("BRAND_SPEC",         "具体型号",   ["BRAND_SPEC"]),
+    ("ORDER_NO SAP",       "SAP订单号",  ["ORDER_NO SAP", "ORDER_NO_SAP", "ORDER_NO"]),
+    ("PURCHASE_DATE",      "购买日期",   ["PURCHASE_DATE"]),
+    ("DRIVER_COUNT",       "司机数量",   ["DRIVER_COUNT"]),
+    ("PURCH_PRICE",        "购买价格",   ["PURCH_PRICE", "PURCHASE_PRICE"]),
+    ("FUEL_DIFF",          "标准油耗差", ["FUEL_DIFF"]),
+    ("INSERT_TIME",        "数据插入时间", ["INSERT_TIME"]),
+    ("SCORE",              "得分",       ["SCORE"]),
+    ("SUMMARY",            "AI分析",     ["SUMMARY"]),
+    ("ANALYSIS_TIME",      "分析时间",   ["ANALYSIS_TIME"]),
+    ("MODEL_NAME",         "使用模型",   ["MODEL_NAME"]),
+]
 
-# =========================
-# 工具函数
-# =========================
+# ----------------- DB & 时间解析 -----------------
 def connect_db():
     return pymysql.connect(
         host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASS,
         database=DB_NAME, charset="utf8mb4", cursorclass=pymysql.cursors.DictCursor
     )
 
-def parse_date_like(s: str) -> Optional[dt.date]:
-    if not s:
-        return None
+def parse_date_like(s: Optional[str]) -> Optional[dt.date]:
+    if not s: return None
     for fmt in ("%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d"):
-        try:
-            return dt.datetime.strptime(s.strip(), fmt).date()
-        except Exception:
-            pass
+        try: return dt.datetime.strptime(s.strip(), fmt).date()
+        except Exception: pass
     m = re.match(r"^\s*(\d{4})[-./](\d{1,2})[-./](\d{1,2})\s*$", s or "")
     if m:
         y, mo, d = map(int, m.groups())
         return dt.date(y, mo, d)
     return None
 
-def parse_date_range(raw: str) -> Tuple[Optional[dt.date], Optional[dt.date]]:
-    if not raw:
-        return None, None
-    s = raw.strip().replace("—", "-").replace("–", "-").replace("到", "-").replace("to", "-").replace("TO", "-")
+def parse_date_range(raw: Optional[str]) -> Tuple[Optional[dt.date], Optional[dt.date]]:
+    if not raw: return None, None
+    s = raw.strip().replace("—","-").replace("–","-").replace("到","-").replace("to","-").replace("TO","-")
     s = re.sub(r"-{2,}", "-", s)
     parts = [p for p in s.split("-") if p.strip()]
     if len(parts) >= 2:
@@ -67,50 +91,24 @@ def parse_date_range(raw: str) -> Tuple[Optional[dt.date], Optional[dt.date]]:
     return None, None
 
 def detect_date_span_from_rows(rows: List[Dict[str, Any]]) -> Tuple[Optional[dt.date], Optional[dt.date]]:
-    if not rows:
-        return None, None
     dates = []
     for r in rows:
         v = r.get("DATE_STR")
-        if isinstance(v, dt.date):
-            dates.append(v)
-        elif isinstance(v, dt.datetime):
-            dates.append(v.date())
+        if isinstance(v, dt.datetime): dates.append(v.date())
+        elif isinstance(v, dt.date):   dates.append(v)
         elif isinstance(v, str):
             d = parse_date_like(v)
-            if d:
-                dates.append(d)
-    if not dates:
-        return None, None
-    return min(dates), max(dates)
+            if d: dates.append(d)
+    return (min(dates), max(dates)) if dates else (None, None)
 
-def to_period_str(span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> str:
-    if span[0] and span[1]:
-        if single_day:
-            return f"（{span[0].strftime('%Y.%m.%d')}）"
-        else:
-            return f"（{span[0].strftime('%Y.%m.%d')}-{span[1].strftime('%Y.%m.%d')}）"
-    return "（）"
-
-def build_where_and_params(
-    date_str: Optional[str],
-    date_from: Optional[str],
-    date_to: Optional[str],
-    date_range: Optional[str],
-    project_name: Optional[str],
-    company: Optional[str],
-) -> Tuple[str, List[Any], Tuple[Optional[dt.date], Optional[dt.date]], bool]:
+def build_where_and_params(date_str, date_from, date_to, date_range, project_name, company):
     where, params = [], []
-    span: Tuple[Optional[dt.date], Optional[dt.date]] = (None, None)
-    single_day = False
+    span = (None, None); single_day = False
 
-    if date_str:
-        d = parse_date_like(date_str)
-        if d:
-            where.append("DATE_STR = %s")
-            params.append(d.strftime("%Y-%m-%d"))
-            span = (d, d)
-            single_day = True
+    d = parse_date_like(date_str) if date_str else None
+    if d:
+        where.append("DATE_STR = %s"); params.append(d.strftime("%Y-%m-%d"))
+        span = (d, d); single_day = True
 
     left = parse_date_like(date_from) if date_from else None
     right = parse_date_like(date_to) if date_to else None
@@ -120,135 +118,108 @@ def build_where_and_params(
     if left and right:
         where.append("DATE_STR BETWEEN %s AND %s")
         params.extend([left.strftime("%Y-%m-%d"), right.strftime("%Y-%m-%d")])
-        span = (left, right)
-        single_day = (left == right)
+        span = (left, right); single_day = (left == right)
 
-    if project_name:
-        where.append("PROJECT_NAME = %s")
-        params.append(project_name)
-    if company:
-        where.append("COMPANY = %s")
-        params.append(company)
+    if project_name: where.append("PROJECT_NAME = %s"); params.append(project_name)
+    if company:      where.append("COMPANY = %s"); params.append(company)
 
     return (" WHERE " + " AND ".join(where)) if where else "", params, span, single_day
 
+# ----------------- Excel 渲染 -----------------
 def col_widths_spec() -> List[float]:
-    # A..AE 共 31 列
-    return [
-        9, 15, 28, 20, 23, 14, 14, 18, 18, 15, 12, 13, 13,
-        21, 21, 13, 12, 15, 21, 20, 40, 18, 19, 16, 20, 13,
-        21, 9, 200, 20, 15
-    ]
+    return [9,15,28,20,23,14,14,18,18,15,12,13,13,21,21,13,12,15,21,20,40,18,19,16,20,13,21,9,200,20,15]
 
+def to_period_str(span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> str:
+    if span[0] and span[1]:
+        return f"（{span[0].strftime('%Y.%m.%d')}）" if single_day \
+               else f"（{span[0].strftime('%Y.%m.%d')}-{span[1].strftime('%Y.%m.%d')}）"
+    return "（）"
 
-# =========================
-# Excel 按要求渲染
-# =========================
-def make_excel(
-    rows: List[Dict[str, Any]],
-    ordered_cols: List[str],
-    project_name_for_title: str,
-    span: Tuple[Optional[dt.date], Optional[dt.date]],
-    single_day: bool
-) -> bytes:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "AI Report"
+def make_excel(rows: List[Dict[str, Any]], project_name_for_title: str,
+               span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> bytes:
+    wb = Workbook(); ws = wb.active; ws.title = "AI Report"
 
-    # 列宽 A..AE
-    widths = col_widths_spec()
-    for idx, w in enumerate(widths, start=1):
+    # 列宽 A..AE（31列）
+    for idx, w in enumerate(col_widths_spec(), start=1):
         ws.column_dimensions[get_column_letter(idx)].width = w
 
-    # ===== 第1行：标题（高度100，仿宋 26 加粗，三行文字，A1:AE1 合并）=====
-    max_cols = 31  # A..AE
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_cols)
-    title = ws.cell(row=1, column=1)
-
-    # 若无传入日期段且有数据，自动用数据里的最小/最大 DATE_STR
+    # 第1行：标题（三行）—— 高100，仿宋26加粗，A1:AE1 合并
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=31)
     if not (span[0] and span[1]) and rows:
-        span = detect_date_span_from_rows(rows)
-        single_day = bool(span[0] and span[1] and span[0] == span[1])
-    date_line = to_period_str(span, single_day)
-
+        span = detect_date_span_from_rows(rows); single_day = (span[0] and span[1] and span[0]==span[1])
+    title_cell = ws.cell(row=1, column=1)
     line1 = f"{project_name_for_title}CATATAN ANALISIS OTOMATIS AI DARI DATA KENDARAAN"
     line2 = "车联网数据AI自动分析记录"
-    title.value = f"{line1}\n{line2}\n{date_line}"
-    title.font = Font(name=FONT_TITLE_NAME, size=26, bold=True)
-    title.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    line3 = to_period_str(span, single_day)
+    title_cell.value = f"{line1}\n{line2}\n{line3}"
+    title_cell.font = Font(name=FONT_TITLE_NAME, size=26, bold=True)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[1].height = 100
 
-    # ===== 第2行：表头（高度40，仿宋 10 加粗，每个单元格两行字）=====
+    # 第2行：表头—— 高40，仿宋10加粗，**每格两行字**（字段名 + 中文）
     ws.row_dimensions[2].height = 40
     header_font = Font(name=FONT_BODY_NAME, size=10, bold=True)
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    headers = ordered_cols
-    for col_idx, col_name in enumerate(headers, start=1):
+    for col_idx, (field, zh, _) in enumerate(COLUMN_SPECS, start=1):
         c = ws.cell(row=2, column=col_idx)
-        c.value = f"{col_name}\n"   # 强制两行
+        c.value = f"{field}\n{zh}"
         c.font = header_font
         c.alignment = header_align
 
-    # ===== 数据区（第3行起，行高40，仿宋10；AC列(第29)顶端左对齐，其他上下左右居中；全区域细边框）=====
-    body_font = Font(name=FONT_BODY_NAME, size=10, bold=False)
+    # 数据区—— 第3行起：行高40，仿宋10；AC(29) 顶左，其余居中；全区域细边框；Y(25) Rp 两位小数
+    body_font = Font(name=FONT_BODY_NAME, size=10)
     center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     top_left_align = Alignment(horizontal="left", vertical="top", wrap_text=True)
-    thin = Side(style="thin", color="000000")
-    thick = Side(style="thick", color="000000")
+    thin, thick = Side(style="thin", color="000000"), Side(style="thick", color="000000")
     border_all = Border(left=thin, right=thin, top=thin, bottom=thin)
 
+    # 逐行写入
     for r_idx, row in enumerate(rows, start=3):
         ws.row_dimensions[r_idx].height = 40
-        for c_idx, col_name in enumerate(headers, start=1):
-            val = row.get(col_name, "")
+        for c_idx, (_, _, alts) in enumerate(COLUMN_SPECS, start=1):
+            # 取第一个存在的键
+            val = ""
+            for k in alts:
+                if k in row and row[k] is not None:
+                    val = row[k]; break
             cell = ws.cell(row=r_idx, column=c_idx, value=val)
             cell.font = body_font
-            cell.alignment = top_left_align if c_idx == 29 else center_align  # AC=29 顶左，其余居中
+            cell.alignment = top_left_align if c_idx == 29 else center_align
             cell.border = border_all
 
-    # ===== 最外层加粗外框线 =====
-    max_row = max(2, 2 + len(rows))
-    max_col = len(headers)
+    # 最外层加粗外框
+    max_row = max(2, 2 + len(rows)); max_col = 31
     for r in range(1, max_row + 1):
         for c in range(1, max_col + 1):
             cell = ws.cell(row=r, column=c)
-            left = thick if c == 1 else cell.border.left
-            right = thick if c == max_col else cell.border.right
-            top = thick if r == 1 else cell.border.top
+            left   = thick if c == 1       else cell.border.left
+            right  = thick if c == max_col else cell.border.right
+            top    = thick if r == 1       else cell.border.top
             bottom = thick if r == max_row else cell.border.bottom
             cell.border = Border(left=left, right=right, top=top, bottom=bottom)
 
-    # ===== Y 列（第25列）设为印尼卢比 Rp 两位小数 =====
+    # Y 列（第25列）Rp 两位小数
     for r in range(3, max_row + 1):
         ws.cell(row=r, column=25).number_format = 'Rp#,##0.00'
 
-    # 输出为字节
-    bio = io.BytesIO()
-    wb.save(bio)
-    bio.seek(0)
+    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
     return bio.read()
 
-
-# =========================
-# API 路由
-# =========================
+# ----------------- API -----------------
 @app.get("/healthz")
 def healthz():
-    # 简单 DB 探活（可选）
     try:
-        conn = connect_db()
-        conn.close()
-        ok = True
+        conn = connect_db(); conn.close()
+        return {"ok": True, "table": DB_TABLE}
     except Exception as e:
         return {"ok": False, "error": str(e), "table": DB_TABLE}
-    return {"ok": True, "table": DB_TABLE}
 
 @app.get("/download_excel")
 def download_excel(
-    DATE_STR: Optional[str] = Query(default=None, description="单日，如 2025-10-07"),
-    DATE_FROM: Optional[str] = Query(default=None, description="起始日，如 2025-10-01"),
-    DATE_TO: Optional[str] = Query(default=None, description="结束日，如 2025-10-15"),
-    DATE_RANGE: Optional[str] = Query(default=None, description="时间段，'2025-10-01到2025-10-15' / '...to...' / '...-...'"),
+    DATE_STR: Optional[str] = Query(default=None),
+    DATE_FROM: Optional[str] = Query(default=None),
+    DATE_TO: Optional[str] = Query(default=None),
+    DATE_RANGE: Optional[str] = Query(default=None),
     PROJECT_NAME: Optional[str] = Query(default=None),
     COMPANY: Optional[str] = Query(default=None),
 ):
@@ -258,7 +229,6 @@ def download_excel(
         DATE_STR, DATE_FROM, DATE_TO, DATE_RANGE, PROJECT_NAME, COMPANY
     )
 
-    # 无任何过滤时，默认限定项目
     if not where_sql:
         where_sql = " WHERE PROJECT_NAME = %s"
         params = [DEFAULT_PROJECT]
@@ -268,55 +238,33 @@ def download_excel(
     try:
         conn = connect_db()
         with conn.cursor() as cur:
-            # 列顺序（前 31 列）
-            cur.execute(f"SHOW COLUMNS FROM `{DB_TABLE}`")
-            ordered_cols = [row["Field"] for row in cur.fetchall()][:31]
-
-            # 查询数据
             cur.execute(sql, params)
-            fetched = cur.fetchall() or []
-
-            # 只保留 ordered_cols 中的列，确保 A..AE 一致
-            rows = [{k: r.get(k, "") for k in ordered_cols} for r in fetched]
-
+            raw_rows = cur.fetchall() or []
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"DB error: {e}"})
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        try: conn.close()
+        except Exception: pass
 
-    if not rows:
+    if not raw_rows:
         return JSONResponse(status_code=404, content={"error": "No data found for given filters"})
 
-    # 生成 Excel
-    excel_bytes = make_excel(
-        rows=rows,
-        ordered_cols=ordered_cols,
-        project_name_for_title=project_for_title,
-        span=span,
-        single_day=single_day,
-    )
+    excel_bytes = make_excel(raw_rows, project_for_title, span, single_day)
 
-    # 文件名：PROJECT + 日期/日期段
+    # 文件名（中文兼容）
     if span[0] and span[1]:
         date_tag = span[0].strftime("%Y%m%d") if single_day else f"{span[0].strftime('%Y%m%d')}-{span[1].strftime('%Y%m%d')}"
     else:
         date_tag = dt.datetime.now().strftime("%Y%m%d")
     safe_proj = re.sub(r"[\\/:*?\"<>|]+", "_", project_for_title)
     filename = f"{safe_proj}_AI_REPORT_{date_tag}.xlsx"
-
-    # 兼容中文文件名（RFC 5987）
     ascii_fallback = re.sub(r"[^\x00-\x7F]+", "_", filename)
     utf8_filename = quote(filename)
     headers = {"Content-Disposition": f"attachment; filename={ascii_fallback}; filename*=UTF-8''{utf8_filename}"}
 
-    return StreamingResponse(
-        io.BytesIO(excel_bytes),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=headers,
-    )
+    return StreamingResponse(io.BytesIO(excel_bytes),
+                             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers=headers)
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
