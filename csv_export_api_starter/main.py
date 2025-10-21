@@ -3,7 +3,7 @@
 
 import os, io, re, datetime as dt
 from typing import List, Dict, Any, Optional, Tuple
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, unquote
 
 import pymysql
 from fastapi import FastAPI, Query, Request
@@ -34,7 +34,16 @@ REDIRECT_OTHER_ERROR   = os.getenv("REDIRECT_OTHER_ERROR",   "http://www.info1.j
 CUTOFF_DATE_STR = os.getenv("CUTOFF_DATE", "2025-09-01")
 CUTOFF_DATE = dt.datetime.strptime(CUTOFF_DATE_STR, "%Y-%m-%d").date()
 
-app = FastAPI(title="Yaoguang Excel Download API", version="1.7.0")
+# 支持的项目名白名单（用于智能匹配）
+PROJECT_WHITELIST = [
+    "Kalteng GIJ 中加一园",
+    "Kasel PBB 南加二园",
+    "Kalsel PU 南加四园",
+    "Kalteng ASP 中加七园",
+    "Kalteng KLM 中加十一园",
+]
+
+app = FastAPI(title="Yaoguang Excel Download API", version="1.8.0")
 
 # =========================
 # 列定义（A..AE 共 31 列）
@@ -77,7 +86,7 @@ COLIDX_Y  = FIELD_TO_COLIDX["PURCH_PRICE"]
 COLIDX_AC = FIELD_TO_COLIDX["SUMMARY"]
 
 # =========================
-# 常用工具函数（日期/跳转）
+# 常用工具函数（日期/跳转/项目名匹配）
 # =========================
 def connect_db():
     return pymysql.connect(
@@ -147,6 +156,28 @@ def redirect_with_error(msg: str, extra: dict, span: Tuple[Optional[dt.date], Op
         if v: params[k] = v
     base = choose_redirect_by_span(span)
     return RedirectResponse(url=f"{base}?{urlencode(params, safe='')}", status_code=status_code)
+
+def _normalize_name(s: str) -> str:
+    """大小写不敏感 + 移除所有空白（含中文空格）"""
+    if s is None: return ""
+    # 去除所有空白字符
+    s2 = re.sub(r"\s+", "", s)
+    return s2.casefold()
+
+def normalize_project_name(raw: Optional[str]) -> Optional[str]:
+    """
+    将传入项目名（可能是URL编码/大小写不同/空格不同）映射到白名单标准写法。
+    若无法匹配，返回解码后的原值；若为空则返回None。
+    """
+    if raw is None:
+        return None
+    decoded = unquote(raw).strip()
+    if not decoded:
+        return None
+    # 建立标准映射
+    canon_map = { _normalize_name(p): p for p in PROJECT_WHITELIST }
+    hit = canon_map.get(_normalize_name(decoded))
+    return hit or decoded
 
 # =========================
 # Excel 渲染
@@ -281,28 +312,30 @@ def healthz():
 @app.get("/download_excel")
 def download_excel(
     request: Request,
-    # 主参数
+    # 主时间参数
     DATE_STR: Optional[str] = Query(default=None, description="单日，例如 2025-10-05"),
     DATE_FROM: Optional[str] = Query(default=None, description="起始日，例如 2025-10-01"),
     DATE_TO: Optional[str]   = Query(default=None, description="结束日，例如 2025-10-07"),
     DATE_RANGE: Optional[str]= Query(default=None, description="范围，如 '2025-10-01到2025-10-07'"),
+    # 项目名（支持URL编码 + 智能匹配白名单）
     PROJECT_NAME: Optional[str] = Query(default=None, description="项目名；缺省为 Kalteng GIJ 中加一园"),
     # 兼容旧用法：?date=YYYY-MM-DD 等价于 DATE_STR
     date: Optional[str] = Query(default=None, alias="date", description="兼容旧参数，等价于 DATE_STR"),
 ):
     # —— 参数规范化
-    PROJECT_NAME = (PROJECT_NAME.strip() or None) if PROJECT_NAME is not None else None
+    # 先处理别名映射
     DATE_STR   = DATE_STR.strip() if DATE_STR else None
     DATE_FROM  = DATE_FROM.strip() if DATE_FROM else None
     DATE_TO    = DATE_TO.strip() if DATE_TO else None
     DATE_RANGE = DATE_RANGE.strip() if DATE_RANGE else None
     date = date.strip() if date else None
-
-    # 别名映射：若传了 ?date 且未显式传 DATE_STR，则以 date 为准
     if date and not DATE_STR:
         DATE_STR = date
 
-    # 用于错误跳转决策的参数跨度（先用最终映射后的参数）
+    # 项目名：先解码再智能匹配
+    PROJECT_NAME = normalize_project_name(PROJECT_NAME)
+
+    # 用于错误跳转决策的参数跨度（用最终映射后的参数）
     input_span = span_from_params(DATE_STR, DATE_FROM, DATE_TO, DATE_RANGE)
 
     # —— 时间必填：三种写法至少一种
@@ -349,7 +382,7 @@ def download_excel(
     except Exception as e:
         msg = f"DB error: {e}"
         return redirect_with_error(msg,
-            {"DATE_STR": DATE_STR, "DATE_FROM": DATE_FROM, "DATE_TO": DATE_TO, "DATE_RANGE": DATE_RANGE, "PROJECT_NAME": PROJECT_NAME},
+            {"DATE_STR": DATE_STR, "DATE_FROM": DATE_FROM, "DATE_TO": DATE_TO, "DATE_RANGE": DATE_RANGE, "PROJECT_NAME": project_for_title},
             input_span) if want_html(request) \
             else JSONResponse(status_code=500, content={"error": msg})
     finally:
@@ -359,7 +392,7 @@ def download_excel(
     if not rows:
         msg = "没有匹配数据"
         return redirect_with_error(msg,
-            {"DATE_STR": DATE_STR, "DATE_FROM": DATE_FROM, "DATE_TO": DATE_TO, "DATE_RANGE": DATE_RANGE, "PROJECT_NAME": PROJECT_NAME},
+            {"DATE_STR": DATE_STR, "DATE_FROM": DATE_FROM, "DATE_TO": DATE_TO, "DATE_RANGE": DATE_RANGE, "PROJECT_NAME": project_for_title},
             input_span) if want_html(request) \
             else JSONResponse(status_code=404, content={"error": msg})
 
