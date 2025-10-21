@@ -27,17 +27,17 @@ DEFAULT_PROJECT = "Kalteng GIJ 中加一园"
 FONT_TITLE_NAME = "仿宋"
 FONT_BODY_NAME  = "仿宋"
 
-# 错误跳转域名（支持环境变量覆盖）
+# 错误跳转域名（可用环境变量覆盖）
 REDIRECT_BEFORE_CUTOFF = os.getenv("REDIRECT_BEFORE_CUTOFF", "http://www.info.julongairoxy.com/")
 REDIRECT_TODAY_FUTURE  = os.getenv("REDIRECT_TODAY_FUTURE",  "http://www.info2.julongairoxy.com/")
 REDIRECT_OTHER_ERROR   = os.getenv("REDIRECT_OTHER_ERROR",   "http://www.info1.julongairoxy.com/")
 CUTOFF_DATE_STR = os.getenv("CUTOFF_DATE", "2025-09-01")
 CUTOFF_DATE = dt.datetime.strptime(CUTOFF_DATE_STR, "%Y-%m-%d").date()
 
-app = FastAPI(title="Yaoguang Excel Download API", version="1.6.0")
+app = FastAPI(title="Yaoguang Excel Download API", version="1.7.0")
 
 # =========================
-# 列定义
+# 列定义（A..AE 共 31 列）
 # =========================
 COLUMN_SPECS = [
     ("ID","序号",["ID"]),
@@ -64,11 +64,11 @@ COLUMN_SPECS = [
     ("ORDER_NO SAP","SAP订单号",["ORDER_NO SAP","ORDER_NO_SAP","ORDER_NO"]),
     ("PURCHASE_DATE","购买日期",["PURCHASE_DATE"]),
     ("DRIVER_COUNT","司机数量",["DRIVER_COUNT"]),
-    ("PURCH_PRICE","购买价格",["PURCH_PRICE","PURCHASE_PRICE"]),
+    ("PURCH_PRICE","购买价格",["PURCH_PRICE","PURCHASE_PRICE"]),   # 25
     ("FUEL_DIFF","标准油耗差",["FUEL_DIFF"]),
-    ("INSERT_TIME","数据插入时间",["INSERT_TIME","CREATE_TIME"]),
+    ("INSERT_TIME","数据插入时间",["INSERT_TIME","CREATE_TIME"]),  # 27
     ("SCORE","得分",["SCORE"]),
-    ("SUMMARY","AI分析",["SUMMARY"]),
+    ("SUMMARY","AI分析",["SUMMARY"]),                              # 29
     ("ANALYSIS_TIME","分析时间",["ANALYSIS_TIME"]),
     ("MODEL_NAME","使用模型",["MODEL_NAME"]),
 ]
@@ -77,7 +77,7 @@ COLIDX_Y  = FIELD_TO_COLIDX["PURCH_PRICE"]
 COLIDX_AC = FIELD_TO_COLIDX["SUMMARY"]
 
 # =========================
-# 工具函数（日期/跳转）
+# 常用工具函数（日期/跳转）
 # =========================
 def connect_db():
     return pymysql.connect(
@@ -88,11 +88,14 @@ def connect_db():
 def parse_date_like(s: Optional[str]) -> Optional[dt.date]:
     if not s: return None
     for fmt in ("%Y-%m-%d","%Y.%m.%d","%Y/%m/%d"):
-        try: return dt.datetime.strptime(s.strip(), fmt).date()
-        except: pass
+        try:
+            return dt.datetime.strptime(s.strip(), fmt).date()
+        except:
+            pass
     m = re.match(r"^\s*(\d{4})[-./](\d{1,2})[-./](\d{1,2})\s*$", s or "")
     if m:
-        y,mo,d = map(int, m.groups()); return dt.date(y,mo,d)
+        y,mo,d = map(int, m.groups())
+        return dt.date(y,mo,d)
     return None
 
 def parse_date_range(raw: Optional[str]) -> Tuple[Optional[dt.date], Optional[dt.date]]:
@@ -120,14 +123,16 @@ def span_from_params(DATE_STR: Optional[str], DATE_FROM: Optional[str], DATE_TO:
     return None, None
 
 def choose_redirect_by_span(span: Tuple[Optional[dt.date], Optional[dt.date]]) -> str:
-    """仅用于错误时的跳转域名选择"""
+    """仅用于错误时的跳转域名选择（包含判定按优先级）"""
     today = dt.date.today()
     s, e = span
-    # 规则优先级：包含 < 2025-09-01 其一 ⇒ info；否则若包含 >= 今天 其一 ⇒ info2；否则 ⇒ info1
+    # 1) 任何一端 < 2025-09-01 → info
     if (s and s < CUTOFF_DATE) or (e and e < CUTOFF_DATE):
         return REDIRECT_BEFORE_CUTOFF
+    # 2) 任何一端 >= 今天 → info2
     if (s and s >= today) or (e and e >= today):
         return REDIRECT_TODAY_FUTURE
+    # 3) 其他 → info1
     return REDIRECT_OTHER_ERROR
 
 def want_html(request: Request) -> bool:
@@ -153,7 +158,8 @@ def detect_date_span_from_rows(rows: List[Dict[str, Any]]) -> Tuple[Optional[dt.
         if isinstance(v, dt.datetime): dates.append(v.date())
         elif isinstance(v, dt.date):   dates.append(v)
         elif isinstance(v, str):
-            d = parse_date_like(v);  d and dates.append(d)
+            d = parse_date_like(v)
+            if d: dates.append(d)
     return (min(dates), max(dates)) if dates else (None, None)
 
 def col_widths_spec() -> List[float]:
@@ -161,7 +167,8 @@ def col_widths_spec() -> List[float]:
 
 def to_period_str(span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> str:
     if span[0] and span[1]:
-        return f"（{span[0].strftime('%Y.%m.%d')}）" if single_day else f"（{span[0].strftime('%Y.%m.%d')}-{span[1].strftime('%Y.%m.%d')}）"
+        return f"（{span[0].strftime('%Y.%m.%d')}）" if single_day \
+               else f"（{span[0].strftime('%Y.%m.%d')}-{span[1].strftime('%Y.%m.%d')}）"
     return "（）"
 
 def _first_present(row: Dict[str, Any], alts: list) -> Any:
@@ -194,7 +201,7 @@ def make_excel(rows: List[Dict[str, Any]], project_name: str, span: Tuple[Option
     body_font = Font(name=FONT_BODY_NAME, size=10)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     top_left = Alignment(horizontal="left",   vertical="top",   wrap_text=True)
-    thin, thick = Side(style="thin", color="000"), Side(style="thick", color="000")
+    thin, thick = Side(style="thin", color="000000"), Side(style="thick", color="000000")
     border_all = Border(left=thin,right=thin,top=thin,bottom=thin)
 
     for r_idx, row in enumerate(rows, start=3):
@@ -274,21 +281,31 @@ def healthz():
 @app.get("/download_excel")
 def download_excel(
     request: Request,
-    DATE_STR: Optional[str] = Query(default=None),
-    DATE_FROM: Optional[str] = Query(default=None),
-    DATE_TO: Optional[str]   = Query(default=None),
-    DATE_RANGE: Optional[str]= Query(default=None),
-    PROJECT_NAME: Optional[str] = Query(default=None),
+    # 主参数
+    DATE_STR: Optional[str] = Query(default=None, description="单日，例如 2025-10-05"),
+    DATE_FROM: Optional[str] = Query(default=None, description="起始日，例如 2025-10-01"),
+    DATE_TO: Optional[str]   = Query(default=None, description="结束日，例如 2025-10-07"),
+    DATE_RANGE: Optional[str]= Query(default=None, description="范围，如 '2025-10-01到2025-10-07'"),
+    PROJECT_NAME: Optional[str] = Query(default=None, description="项目名；缺省为 Kalteng GIJ 中加一园"),
+    # 兼容旧用法：?date=YYYY-MM-DD 等价于 DATE_STR
+    date: Optional[str] = Query(default=None, alias="date", description="兼容旧参数，等价于 DATE_STR"),
 ):
+    # —— 参数规范化
     PROJECT_NAME = (PROJECT_NAME.strip() or None) if PROJECT_NAME is not None else None
     DATE_STR   = DATE_STR.strip() if DATE_STR else None
     DATE_FROM  = DATE_FROM.strip() if DATE_FROM else None
     DATE_TO    = DATE_TO.strip() if DATE_TO else None
     DATE_RANGE = DATE_RANGE.strip() if DATE_RANGE else None
+    date = date.strip() if date else None
 
-    # 用于错误跳转决策的参数跨度
+    # 别名映射：若传了 ?date 且未显式传 DATE_STR，则以 date 为准
+    if date and not DATE_STR:
+        DATE_STR = date
+
+    # 用于错误跳转决策的参数跨度（先用最终映射后的参数）
     input_span = span_from_params(DATE_STR, DATE_FROM, DATE_TO, DATE_RANGE)
 
+    # —— 时间必填：三种写法至少一种
     span = (None, None); single_day = False
     where, params = [], []
 
@@ -318,6 +335,7 @@ def download_excel(
                 input_span) if want_html(request) \
                 else JSONResponse(status_code=400, content={"error": msg})
 
+    # —— 项目：可选；不传则默认 GIJ
     project_for_title = PROJECT_NAME or DEFAULT_PROJECT
     where.append("PROJECT_NAME = %s"); params.append(project_for_title)
 
@@ -345,8 +363,10 @@ def download_excel(
             input_span) if want_html(request) \
             else JSONResponse(status_code=404, content={"error": msg})
 
+    # —— 生成 Excel
     excel_bytes = make_excel(rows, project_for_title, span, single_day)
 
+    # —— 文件名
     if span[0] and span[1]:
         date_tag = span[0].strftime("%Y%m%d") if single_day else f"{span[0].strftime('%Y%m%d')}-{span[1].strftime('%Y%m%d')}"
     else:
@@ -362,5 +382,5 @@ def download_excel(
                              headers=headers)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "8000"))  # Railway 会注入 PORT
     uvicorn_run("main:app", host="0.0.0.0", port=port, reload=True)
