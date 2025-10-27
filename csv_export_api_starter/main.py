@@ -43,7 +43,7 @@ PROJECT_WHITELIST = [
     "Kalteng KLM 中加十一园",
 ]
 
-app = FastAPI(title="Yaoguang Excel Download API", version="1.8.0")
+app = FastAPI(title="Yaoguang Excel Download API", version="1.9.0")  # 版本号+0.1
 
 # =========================
 # 列定义（A..AE 共 31 列）
@@ -117,7 +117,6 @@ def parse_date_range(raw: Optional[str]) -> Tuple[Optional[dt.date], Optional[dt
     return None, None
 
 def span_from_params(DATE_STR: Optional[str], DATE_FROM: Optional[str], DATE_TO: Optional[str], DATE_RANGE: Optional[str]) -> Tuple[Optional[dt.date], Optional[dt.date]]:
-    """从参数推导[min_date, max_date]；单日返回(d,d)。解析失败返回(None,None)"""
     if DATE_STR:
         d = parse_date_like(DATE_STR)
         return (d, d) if d else (None, None)
@@ -132,16 +131,12 @@ def span_from_params(DATE_STR: Optional[str], DATE_FROM: Optional[str], DATE_TO:
     return None, None
 
 def choose_redirect_by_span(span: Tuple[Optional[dt.date], Optional[dt.date]]) -> str:
-    """仅用于错误时的跳转域名选择（包含判定按优先级）"""
     today = dt.date.today()
     s, e = span
-    # 1) 任何一端 < 2025-09-01 → info
     if (s and s < CUTOFF_DATE) or (e and e < CUTOFF_DATE):
         return REDIRECT_BEFORE_CUTOFF
-    # 2) 任何一端 >= 今天 → info2
     if (s and s >= today) or (e and e >= today):
         return REDIRECT_TODAY_FUTURE
-    # 3) 其他 → info1
     return REDIRECT_OTHER_ERROR
 
 def want_html(request: Request) -> bool:
@@ -158,29 +153,22 @@ def redirect_with_error(msg: str, extra: dict, span: Tuple[Optional[dt.date], Op
     return RedirectResponse(url=f"{base}?{urlencode(params, safe='')}", status_code=status_code)
 
 def _normalize_name(s: str) -> str:
-    """大小写不敏感 + 移除所有空白（含中文空格）"""
     if s is None: return ""
-    # 去除所有空白字符
     s2 = re.sub(r"\s+", "", s)
     return s2.casefold()
 
 def normalize_project_name(raw: Optional[str]) -> Optional[str]:
-    """
-    将传入项目名（可能是URL编码/大小写不同/空格不同）映射到白名单标准写法。
-    若无法匹配，返回解码后的原值；若为空则返回None。
-    """
     if raw is None:
         return None
     decoded = unquote(raw).strip()
     if not decoded:
         return None
-    # 建立标准映射
     canon_map = { _normalize_name(p): p for p in PROJECT_WHITELIST }
     hit = canon_map.get(_normalize_name(decoded))
     return hit or decoded
 
 # =========================
-# Excel 渲染
+# Excel 渲染 & 排名辅助
 # =========================
 def detect_date_span_from_rows(rows: List[Dict[str, Any]]) -> Tuple[Optional[dt.date], Optional[dt.date]]:
     dates = []
@@ -208,20 +196,61 @@ def _first_present(row: Dict[str, Any], alts: list) -> Any:
             return row[k]
     return ""
 
-def make_excel(rows: List[Dict[str, Any]], project_name: str, span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> bytes:
-    wb = Workbook(); ws = wb.active; ws.title = "AI Report"
+def _as_float(x, default: float) -> float:
+    try:
+        if x is None: return default
+        if isinstance(x, (int, float)): return float(x)
+        s = str(x).strip()
+        if not s: return default
+        return float(s)
+    except:
+        return default
+
+def classify_alat(row: Dict[str, Any]) -> Optional[str]:
+    """
+    返回 'sedang' / 'berat' / None
+    依据 MACHINE_CATEGORY / MACHINE_TYPE / CAR_TYPE 文本包含关键词（不区分大小写）
+    """
+    keys = ("MACHINE_CATEGORY", "MACHINE_TYPE", "CAR_TYPE")
+    text = " ".join([str(row.get(k, "")) for k in keys]).casefold()
+    if "sedang" in text:
+        return "sedang"
+    if "berat" in text:
+        return "berat"
+    return None
+
+def sort_key_for_ranking(row: Dict[str, Any]):
+    # 主排序：SCORE（降序）; 次排序：VALID_DURATION（降序）; 再次：DAY_OIL（升序更省油 / 或者降序？这里用降序更偏“表现强”可自行改）
+    score = _as_float(row.get("SCORE"), float("-inf"))
+    valid = _as_float(row.get("VALID_DURATION"), float("-inf"))
+    oil   = _as_float(row.get("DAY_OIL"), float("-inf"))
+    # 兜底用ID升序
+    try:
+        rid = int(row.get("ID")) if row.get("ID") is not None else 10**12
+    except:
+        rid = 10**12
+    # Python 的排序是升序，所以用负号实现降序
+    return (-score, -valid, -oil, rid)
+
+def render_sheet(ws, rows: List[Dict[str, Any]], project_name: str,
+                 span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool,
+                 sheet_title_suffix: str):
+    # 列宽
     for idx, w in enumerate(col_widths_spec(), start=1):
         ws.column_dimensions[get_column_letter(idx)].width = w
 
+    # 标题
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=31)
     if not (span[0] and span[1]) and rows:
         span = detect_date_span_from_rows(rows); single_day = (span[0] and span[1] and span[0]==span[1])
     c = ws.cell(row=1, column=1)
-    c.value = f"{project_name}CATATAN ANALISIS OTOMATIS AI DARI DATA KENDARAAN\n车联网数据AI自动分析记录\n{to_period_str(span, single_day)}"
+    # 在标题上追加子表类别后缀
+    c.value = f"{project_name}CATATAN ANALISIS OTOMATIS AI DARI DATA KENDARAAN - {sheet_title_suffix}\n车联网数据AI自动分析记录 - {sheet_title_suffix}\n{to_period_str(span, single_day)}"
     c.font = Font(name=FONT_TITLE_NAME, size=26, bold=True)
     c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 100
+    ws.row_dimensions[1].height = 110
 
+    # 表头
     ws.row_dimensions[2].height = 40
     head_font = Font(name=FONT_BODY_NAME, size=10, bold=True)
     head_align= Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -229,6 +258,7 @@ def make_excel(rows: List[Dict[str, Any]], project_name: str, span: Tuple[Option
         cell = ws.cell(row=2, column=j, value=f"{f}\n{zh}")
         cell.font=head_font; cell.alignment=head_align
 
+    # 正文
     body_font = Font(name=FONT_BODY_NAME, size=10)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     top_left = Alignment(horizontal="left",   vertical="top",   wrap_text=True)
@@ -254,10 +284,43 @@ def make_excel(rows: List[Dict[str, Any]], project_name: str, span: Tuple[Option
             bottom = thick if r==max_row else cell.border.bottom
             cell.border = Border(left=left,right=right,top=top,bottom=bottom)
 
+    # 价格列格式
     for r in range(3, max_row+1):
         ws.cell(row=r, column=COLIDX_Y).number_format = 'Rp#,##0.00'
 
-    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
+def make_excel_multisheet(rows: List[Dict[str, Any]], project_name: str,
+                          span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> bytes:
+    """
+    生成包含两个子表的工作簿：
+      - 第一张：Alat Sedang（已按排名排序）
+      - 第二张：Alat Berat（已按排名排序）
+    """
+    # 先按类别分组
+    sedang_rows, berat_rows = [], []
+    for r in rows:
+        cat = classify_alat(r)
+        if cat == "sedang":
+            sedang_rows.append(r)
+        elif cat == "berat":
+            berat_rows.append(r)
+        # 其它类别（无法判断）直接忽略，不进入两张表
+
+    # 排名（排序）
+    sedang_rows_sorted = sorted(sedang_rows, key=sort_key_for_ranking)
+    berat_rows_sorted  = sorted(berat_rows,  key=sort_key_for_ranking)
+
+    wb = Workbook()
+    # 第1张：Alat Sedang
+    ws1 = wb.active
+    ws1.title = "Alat Sedang"
+    render_sheet(ws1, sedang_rows_sorted, project_name, span, single_day, "Alat Sedang (Peringkat)")
+
+    # 第2张：Alat Berat
+    ws2 = wb.create_sheet(title="Alat Berat")
+    render_sheet(ws2, berat_rows_sorted, project_name, span, single_day, "Alat Berat (Peringkat)")
+
+    bio = io.BytesIO()
+    wb.save(bio); bio.seek(0)
     return bio.read()
 
 # =========================
@@ -271,7 +334,7 @@ def ui(error: Optional[str] = None):
 <title>AI 报表下载</title></head>
 <body style="font-family:Segoe UI,Roboto,Arial,'微软雅黑';max-width:880px;margin:40px auto;padding:0 16px">
 <h1>车联网数据 AI 报表下载</h1>
-<p>填写日期与项目名后点击下载。只下载单日时，仅填“单日”。</p>
+<p>填写日期与项目名后点击下载。只下载单日时，仅填“单日”。导出的Excel包含两张子表：Alat Sedang（第1张）与 Alat Berat（第2张）。</p>
 <div>
 <label>单日：</label><input id="DATE_STR" placeholder="YYYY-MM-DD">
 <label style="margin-left:12px">开始：</label><input id="DATE_FROM" placeholder="YYYY-MM-DD">
@@ -323,7 +386,6 @@ def download_excel(
     date: Optional[str] = Query(default=None, alias="date", description="兼容旧参数，等价于 DATE_STR"),
 ):
     # —— 参数规范化
-    # 先处理别名映射
     DATE_STR   = DATE_STR.strip() if DATE_STR else None
     DATE_FROM  = DATE_FROM.strip() if DATE_FROM else None
     DATE_TO    = DATE_TO.strip() if DATE_TO else None
@@ -332,13 +394,10 @@ def download_excel(
     if date and not DATE_STR:
         DATE_STR = date
 
-    # 项目名：先解码再智能匹配
     PROJECT_NAME = normalize_project_name(PROJECT_NAME)
-
-    # 用于错误跳转决策的参数跨度（用最终映射后的参数）
     input_span = span_from_params(DATE_STR, DATE_FROM, DATE_TO, DATE_RANGE)
 
-    # —— 时间必填：三种写法至少一种
+    # —— 时间必填
     span = (None, None); single_day = False
     where, params = [], []
 
@@ -396,8 +455,8 @@ def download_excel(
             input_span) if want_html(request) \
             else JSONResponse(status_code=404, content={"error": msg})
 
-    # —— 生成 Excel
-    excel_bytes = make_excel(rows, project_for_title, span, single_day)
+    # —— 生成 Excel（多子表）
+    excel_bytes = make_excel_multisheet(rows, project_for_title, span, single_day)
 
     # —— 文件名
     if span[0] and span[1]:
@@ -415,5 +474,5 @@ def download_excel(
                              headers=headers)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))  # Railway 会注入 PORT
+    port = int(os.getenv("PORT", "8000"))
     uvicorn_run("main:app", host="0.0.0.0", port=port, reload=True)
