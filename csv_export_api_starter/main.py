@@ -12,6 +12,7 @@ from uvicorn import run as uvicorn_run
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.formatting.rule import DataBarRule  # ← 新增：用于数据条条件格式
 
 # =========================
 # 配置
@@ -43,7 +44,7 @@ PROJECT_WHITELIST = [
     "Kalteng KLM 中加十一园",
 ]
 
-app = FastAPI(title="Yaoguang Excel Download API", version="2.1.1")
+app = FastAPI(title="Yaoguang Excel Download API", version="2.2.0")
 
 # =========================
 # 基础列清单（去掉 ID；新增 RANK_TODAY）
@@ -316,7 +317,7 @@ def render_sheet(ws,
     sheet_specs = build_columns_for_sheet(sheet_kind)
     ncols = len(sheet_specs)
 
-    # 列宽
+    # 列宽（先给默认，再单独把 SUMMARY 设为 200）
     for idx, w in enumerate(col_widths_for_specs(ncols), start=1):
         ws.column_dimensions[get_column_letter(idx)].width = w
 
@@ -353,6 +354,11 @@ def render_sheet(ws,
     # 关键列索引（用于样式）
     summary_col_idx = next((idx+1 for idx,(en,_,_) in enumerate(sheet_specs) if en=="SUMMARY"), None)
     purch_col_idx   = next((idx+1 for idx,(en,_,_) in enumerate(sheet_specs) if en=="PURCH_PRICE"), None)
+    score_col_idx   = next((idx+1 for idx,(en,_,_) in enumerate(sheet_specs) if en=="SCORE"), None)
+
+    # 把 SUMMARY 列宽设为 200
+    if summary_col_idx is not None:
+        ws.column_dimensions[get_column_letter(summary_col_idx)].width = 200
 
     for r_idx, row in enumerate(rows, start=3):
         ws.row_dimensions[r_idx].height = 40
@@ -377,6 +383,15 @@ def render_sheet(ws,
     if purch_col_idx is not None:
         for r in range(3, max_row+1):
             ws.cell(row=r, column=purch_col_idx).number_format = 'Rp#,##0.00'
+
+    # ========= 条件格式：SCORE 数据条（渐变填充） =========
+    # Excel 中的“开始 → 条件格式 → 数据条 → 渐变填充”
+    if score_col_idx is not None and max_row > 2:
+        col_letter = get_column_letter(score_col_idx)
+        data_range = f"{col_letter}3:{col_letter}{max_row}"
+        # gradient=True 表示渐变填充；color 使用 Excel 常见默认蓝色（可改）
+        rule = DataBarRule(start_type="min", end_type="max", color="638EC6", showValue=True, minLength=None, maxLength=None, gradient=True)
+        ws.conditional_formatting.add(data_range, rule)
 
 def make_excel_multisheet(rows: List[Dict[str, Any]], project_name: str,
                           span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> bytes:
@@ -420,7 +435,7 @@ def ui(error: Optional[str] = None):
 <title>AI 报表下载</title></head>
 <body style="font-family:Segoe UI,Roboto,Arial,'微软雅黑';max-width:880px;margin:40px auto;padding:0 16px">
 <h1>车联网数据 AI 报表下载</h1>
-<p>导出的Excel包含两张子表：Alat Sedang（第1张）与 Alat Berat（第2张）；每张表的显示列与顺序按要求定制，且为“当日排名”。</p>
+<p>导出的Excel包含两张子表：Alat Sedang（第1张）与 Alat Berat（第2张）；每张表的显示列与顺序按要求定制，且为“当日排名”。AI分析列宽已设为200，得分列带渐变数据条。</p>
 <div>
 <label>单日：</label><input id="DATE_STR" placeholder="YYYY-MM-DD">
 <label style="margin-left:12px">开始：</label><input id="DATE_FROM" placeholder="YYYY-MM-DD">
