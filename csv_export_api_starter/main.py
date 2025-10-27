@@ -43,13 +43,13 @@ PROJECT_WHITELIST = [
     "Kalteng KLM 中加十一园",
 ]
 
-app = FastAPI(title="Yaoguang Excel Download API", version="1.9.0")  # 版本号+0.1
+app = FastAPI(title="Yaoguang Excel Download API", version="2.0.0")
 
 # =========================
-# 列定义（A..AE 共 31 列）
+# 列定义（去掉 ID，新增“当日排名”放在第一列）
 # =========================
 COLUMN_SPECS = [
-    ("ID","序号",["ID"]),
+    ("RANK_TODAY","当日排名",["RANK_TODAY"]),                 # NEW
     ("DEVICE_ID","工时通编号",["DEVICE_ID"]),
     ("PROJECT_NAME","系统项目名称",["PROJECT_NAME"]),
     ("MECHANICAL_NO","系统编号",["MECHANICAL_NO"]),
@@ -73,11 +73,11 @@ COLUMN_SPECS = [
     ("ORDER_NO SAP","SAP订单号",["ORDER_NO SAP","ORDER_NO_SAP","ORDER_NO"]),
     ("PURCHASE_DATE","购买日期",["PURCHASE_DATE"]),
     ("DRIVER_COUNT","司机数量",["DRIVER_COUNT"]),
-    ("PURCH_PRICE","购买价格",["PURCH_PRICE","PURCHASE_PRICE"]),   # 25
+    ("PURCH_PRICE","购买价格",["PURCH_PRICE","PURCHASE_PRICE"]),
     ("FUEL_DIFF","标准油耗差",["FUEL_DIFF"]),
-    ("INSERT_TIME","数据插入时间",["INSERT_TIME","CREATE_TIME"]),  # 27
+    ("INSERT_TIME","数据插入时间",["INSERT_TIME","CREATE_TIME"]),
     ("SCORE","得分",["SCORE"]),
-    ("SUMMARY","AI分析",["SUMMARY"]),                              # 29
+    ("SUMMARY","AI分析",["SUMMARY"]),
     ("ANALYSIS_TIME","分析时间",["ANALYSIS_TIME"]),
     ("MODEL_NAME","使用模型",["MODEL_NAME"]),
 ]
@@ -182,7 +182,8 @@ def detect_date_span_from_rows(rows: List[Dict[str, Any]]) -> Tuple[Optional[dt.
     return (min(dates), max(dates)) if dates else (None, None)
 
 def col_widths_spec() -> List[float]:
-    return [9,15,28,20,23,14,14,18,18,15,12,13,13,21,21,13,12,15,21,20,40,18,19,16,20,13,21,9,200,20,15]
+    # 第一列换成“当日排名”，适当宽一点
+    return [10,15,28,20,23,14,14,18,18,15,12,13,13,21,21,13,12,15,21,20,40,18,19,16,20,13,21,9,200,20,15]
 
 def to_period_str(span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> str:
     if span[0] and span[1]:
@@ -220,17 +221,45 @@ def classify_alat(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 def sort_key_for_ranking(row: Dict[str, Any]):
-    # 主排序：SCORE（降序）; 次排序：VALID_DURATION（降序）; 再次：DAY_OIL（升序更省油 / 或者降序？这里用降序更偏“表现强”可自行改）
+    # 主排序：SCORE（降序）；次：VALID_DURATION（降序）；再：DAY_OIL（降序）；兜底：ID（升序）
     score = _as_float(row.get("SCORE"), float("-inf"))
     valid = _as_float(row.get("VALID_DURATION"), float("-inf"))
     oil   = _as_float(row.get("DAY_OIL"), float("-inf"))
-    # 兜底用ID升序
     try:
         rid = int(row.get("ID")) if row.get("ID") is not None else 10**12
     except:
         rid = 10**12
-    # Python 的排序是升序，所以用负号实现降序
     return (-score, -valid, -oil, rid)
+
+def sort_and_rank_by_date(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    按 DATE_STR 分组；每个日期内按 sort_key_for_ranking 排序并写入 RANK_TODAY = 1,2,3...
+    返回合并后的列表（按日期升序 → 排名升序）
+    """
+    # 分组
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    def norm_date_str(v) -> str:
+        if isinstance(v, dt.datetime): return v.date().strftime("%Y-%m-%d")
+        if isinstance(v, dt.date):     return v.strftime("%Y-%m-%d")
+        if isinstance(v, str):
+            d = parse_date_like(v)
+            return d.strftime("%Y-%m-%d") if d else "0001-01-01"
+        return "0001-01-01"
+
+    for r in rows:
+        key = norm_date_str(r.get("DATE_STR"))
+        buckets.setdefault(key, []).append(r)
+
+    # 对每个日期分桶排序并赋名次
+    out: List[Dict[str, Any]] = []
+    for date_key in sorted(buckets.keys()):  # 日期升序
+        group = buckets[date_key]
+        group_sorted = sorted(group, key=sort_key_for_ranking)
+        for idx, row in enumerate(group_sorted, start=1):
+            row = dict(row)  # 复制一份，避免副作用
+            row["RANK_TODAY"] = idx
+            out.append(row)
+    return out
 
 def render_sheet(ws, rows: List[Dict[str, Any]], project_name: str,
                  span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool,
@@ -240,11 +269,10 @@ def render_sheet(ws, rows: List[Dict[str, Any]], project_name: str,
         ws.column_dimensions[get_column_letter(idx)].width = w
 
     # 标题
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=31)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(COLUMN_SPECS))
     if not (span[0] and span[1]) and rows:
         span = detect_date_span_from_rows(rows); single_day = (span[0] and span[1] and span[0]==span[1])
     c = ws.cell(row=1, column=1)
-    # 在标题上追加子表类别后缀
     c.value = f"{project_name}CATATAN ANALISIS OTOMATIS AI DARI DATA KENDARAAN - {sheet_title_suffix}\n车联网数据AI自动分析记录 - {sheet_title_suffix}\n{to_period_str(span, single_day)}"
     c.font = Font(name=FONT_TITLE_NAME, size=26, bold=True)
     c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -274,7 +302,7 @@ def render_sheet(ws, rows: List[Dict[str, Any]], project_name: str,
             cell.alignment = top_left if c_idx==COLIDX_AC else center
             cell.border = border_all
 
-    max_row = max(2, 2+len(rows)); max_col = 31
+    max_row = max(2, 2+len(rows)); max_col = len(COLUMN_SPECS)
     for r in range(1, max_row+1):
         for c in range(1, max_col+1):
             cell = ws.cell(row=r, column=c)
@@ -292,8 +320,8 @@ def make_excel_multisheet(rows: List[Dict[str, Any]], project_name: str,
                           span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> bytes:
     """
     生成包含两个子表的工作簿：
-      - 第一张：Alat Sedang（已按排名排序）
-      - 第二张：Alat Berat（已按排名排序）
+      - 第一张：Alat Sedang（按“当日排名”分组排序且写入 RANK_TODAY）
+      - 第二张：Alat Berat（同上）
     """
     # 先按类别分组
     sedang_rows, berat_rows = [], []
@@ -303,21 +331,21 @@ def make_excel_multisheet(rows: List[Dict[str, Any]], project_name: str,
             sedang_rows.append(r)
         elif cat == "berat":
             berat_rows.append(r)
-        # 其它类别（无法判断）直接忽略，不进入两张表
+        # 其它类别（无法判断）不进入两张表
 
-    # 排名（排序）
-    sedang_rows_sorted = sorted(sedang_rows, key=sort_key_for_ranking)
-    berat_rows_sorted  = sorted(berat_rows,  key=sort_key_for_ranking)
+    # 各子表：按“当日”分组排序并写入名次
+    sedang_ranked = sort_and_rank_by_date(sedang_rows)
+    berat_ranked  = sort_and_rank_by_date(berat_rows)
 
     wb = Workbook()
     # 第1张：Alat Sedang
     ws1 = wb.active
     ws1.title = "Alat Sedang"
-    render_sheet(ws1, sedang_rows_sorted, project_name, span, single_day, "Alat Sedang (Peringkat)")
+    render_sheet(ws1, sedang_ranked, project_name, span, single_day, "Alat Sedang (Peringkat Harian)")
 
     # 第2张：Alat Berat
     ws2 = wb.create_sheet(title="Alat Berat")
-    render_sheet(ws2, berat_rows_sorted, project_name, span, single_day, "Alat Berat (Peringkat)")
+    render_sheet(ws2, berat_ranked, project_name, span, single_day, "Alat Berat (Peringkat Harian)")
 
     bio = io.BytesIO()
     wb.save(bio); bio.seek(0)
@@ -334,7 +362,7 @@ def ui(error: Optional[str] = None):
 <title>AI 报表下载</title></head>
 <body style="font-family:Segoe UI,Roboto,Arial,'微软雅黑';max-width:880px;margin:40px auto;padding:0 16px">
 <h1>车联网数据 AI 报表下载</h1>
-<p>填写日期与项目名后点击下载。只下载单日时，仅填“单日”。导出的Excel包含两张子表：Alat Sedang（第1张）与 Alat Berat（第2张）。</p>
+<p>填写日期与项目名后点击下载。只下载单日时，仅填“单日”。导出的Excel包含两张子表：Alat Sedang（第1张）与 Alat Berat（第2张），且各自为“当日排名”。</p>
 <div>
 <label>单日：</label><input id="DATE_STR" placeholder="YYYY-MM-DD">
 <label style="margin-left:12px">开始：</label><input id="DATE_FROM" placeholder="YYYY-MM-DD">
@@ -455,7 +483,7 @@ def download_excel(
             input_span) if want_html(request) \
             else JSONResponse(status_code=404, content={"error": msg})
 
-    # —— 生成 Excel（多子表）
+    # —— 生成 Excel（多子表，含“当日排名”列）
     excel_bytes = make_excel_multisheet(rows, project_for_title, span, single_day)
 
     # —— 文件名
