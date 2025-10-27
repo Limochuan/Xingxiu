@@ -12,7 +12,7 @@ from uvicorn import run as uvicorn_run
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.formatting.rule import DataBarRule  # ← 新增：用于数据条条件格式
+from openpyxl.formatting.rule import DataBarRule  # 条件格式：数据条
 
 # =========================
 # 配置
@@ -44,7 +44,7 @@ PROJECT_WHITELIST = [
     "Kalteng KLM 中加十一园",
 ]
 
-app = FastAPI(title="Yaoguang Excel Download API", version="2.2.0")
+app = FastAPI(title="Yaoguang Excel Download API", version="2.2.1")
 
 # =========================
 # 基础列清单（去掉 ID；新增 RANK_TODAY）
@@ -216,7 +216,7 @@ def classify_alat(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 def sort_key_for_ranking(row: Dict[str, Any]):
-    # 排名排序键：SCORE↓, VALID_DURATION↓, DAY_OIL↓, ID↑(兜底，不输出)
+    # 排名键：SCORE↓, VALID_DURATION↓, DAY_OIL↓, ID↑(兜底，不输出)
     score = _as_float(row.get("SCORE"), float("-inf"))
     valid = _as_float(row.get("VALID_DURATION"), float("-inf"))
     oil   = _as_float(row.get("DAY_OIL"), float("-inf"))
@@ -228,8 +228,7 @@ def sort_key_for_ranking(row: Dict[str, Any]):
 
 def sort_and_rank_by_date(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    按 DATE_STR 分桶；每桶内按 sort_key_for_ranking 排序并写入 RANK_TODAY = 1..n
-    返回按日期升序拼接的结果
+    按 DATE_STR 分桶；每桶内排序并写入 RANK_TODAY = 1..n；返回日期升序拼接的结果
     """
     buckets: Dict[str, List[Dict[str, Any]]] = {}
     def norm_date_str(v) -> str:
@@ -300,7 +299,7 @@ def build_columns_for_sheet(sheet_kind: str) -> List[Tuple[str,str,list]]:
     return chosen
 
 def col_widths_for_specs(ncols: int) -> List[float]:
-    # 第一列“当日排名”稍窄些，其余统一宽度
+    # 第一列“当日排名”稍窄，其余统一宽度
     return [10] + [18]*(ncols-1)
 
 # =========================
@@ -384,14 +383,35 @@ def render_sheet(ws,
         for r in range(3, max_row+1):
             ws.cell(row=r, column=purch_col_idx).number_format = 'Rp#,##0.00'
 
-    # ========= 条件格式：SCORE 数据条（渐变填充） =========
-    # Excel 中的“开始 → 条件格式 → 数据条 → 渐变填充”
+    # ========= 条件格式：SCORE 数据条（渐变填充，兼容写法） =========
     if score_col_idx is not None and max_row > 2:
         col_letter = get_column_letter(score_col_idx)
         data_range = f"{col_letter}3:{col_letter}{max_row}"
-        # gradient=True 表示渐变填充；color 使用 Excel 常见默认蓝色（可改）
-        rule = DataBarRule(start_type="min", end_type="max", color="638EC6", showValue=True, minLength=None, maxLength=None, gradient=True)
-        ws.conditional_formatting.add(data_range, rule)
+        try:
+            # 使用 ARGB 颜色；默认绿色数据条（含 Alpha 通道）
+            rule = DataBarRule(
+                start_type="min", start_value=None,
+                end_type="max",   end_value=None,
+                color="FF63C384",   # 绿色
+                showValue=True,
+                minLength=0, maxLength=100,
+                gradient=True
+            )
+            ws.conditional_formatting.add(data_range, rule)
+        except Exception:
+            # 保守降级（兼容某些 openpyxl 版本）
+            try:
+                rule = DataBarRule(
+                    start_type="min", start_value=0,
+                    end_type="max",   end_value=0,
+                    color="FF63C384",
+                    showValue=True,
+                    gradient=True
+                )
+                ws.conditional_formatting.add(data_range, rule)
+            except Exception:
+                # 条件格式失败不影响导出
+                pass
 
 def make_excel_multisheet(rows: List[Dict[str, Any]], project_name: str,
                           span: Tuple[Optional[dt.date], Optional[dt.date]], single_day: bool) -> bytes:
