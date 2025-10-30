@@ -21,8 +21,10 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 40  # 防止长时间挂起
 
     env:
+      TZ: Asia/Jakarta
       DATE_STR: ${{ github.event.inputs.date }}
 
       DEVICE_TABLE: xingxiu_device_info
@@ -35,9 +37,8 @@ jobs:
       DB_PASS: ${{ secrets.DB_PASS }}
       DB_NAME: ${{ secrets.DB_NAME }}
 
-      # ✅ 关键修正：脚本需要 API_BASE
       API_BASE:     ${{ secrets.API_BASE_URL }}
-      API_BASE_URL: ${{ secrets.API_BASE_URL }}  # 可选保留
+      API_BASE_URL: ${{ secrets.API_BASE_URL }}
 
     steps:
       - uses: actions/checkout@v4
@@ -45,23 +46,69 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+
+      - name: Resolve DATE_STR (default to JKT yesterday)
+        run: |
+          if [ -z "${DATE_STR}" ]; then
+            YDAY=$(date -d "TZ=\"${TZ}\" yesterday" +%F 2>/dev/null || true)
+            # macOS fallback syntax（虽然这里是 ubuntu，但留着更稳）
+            if [ -z "$YDAY" ]; then YDAY=$(TZ="${TZ}" date -v-1d +%F); fi
+            echo "DATE_STR=$YDAY" >> "$GITHUB_ENV"
+            echo "Resolved DATE_STR=$YDAY"
+          else
+            echo "DATE_STR=${DATE_STR}" >> "$GITHUB_ENV"
+            echo "Using provided DATE_STR=${DATE_STR}"
+          fi
+
+      - name: Quick network preflight (curl /ping)
+        run: |
+          set -eux
+          PING_URL="${API_BASE%/}/ping"
+          echo "Ping: ${PING_URL}"
+          # 先测 2 次快速连通
+          for i in 1 2; do
+            if curl -sS -I --connect-timeout 5 --max-time 10 "$PING_URL" | head -n1 ; then
+              echo "Preflight OK (try $i)"
+              exit 0
+            fi
+            sleep 2
+          done
+          # 再做 1 次带重试与详情的尝试
+          curl -v --connect-timeout 5 --max-time 15 --retry 3 --retry-delay 2 "$PING_URL"
+        shell: bash
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
       - name: Fetch daily data into DB
-        run: python daily_sync/fetch_and_store_daily.py
+        run: |
+          python -X utf8 daily_sync/fetch_and_store_daily.py 2>&1 | tee fetch_daily.log
 
       - name: Merge daily into business report
-        run: python daily_sync/merge_daily_to_report_upsert.py
+        run: |
+          python -X utf8 daily_sync/merge_daily_to_report_upsert.py 2>&1 | tee merge_daily.log
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daily-sync-logs
-          path: merge_daily.log
-          if-no-files-found: ignore
+          path: |
+            fetch_daily.log
+            merge_daily.log
+          if-no-files-found: warn
           retention-days: 7
+
+      # 可选：网络诊断（只在失败时执行，帮你判断是 81 端口/出站受限）
+      - name: Post-mortem net diag
+        if: failure()
+        run: |
+          set -x
+          which traceroute || sudo apt-get update && sudo apt-get install -y traceroute
+          traceroute -n "$(echo "$API_BASE" | sed -E 's#https?://([^/:]+).*#\1#')"
+          curl -I --connect-timeout 5 --max-time 10 https://example.com || true
