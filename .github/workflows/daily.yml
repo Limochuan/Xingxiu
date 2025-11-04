@@ -23,11 +23,13 @@ jobs:
       # 脚本路径
       SCRIPT_PATH: daily_sync/fetch_and_store_daily.py
 
-      # API
+      # --- 这里是关键改动 ---
+      # 你的 secret 叫 API_BASE_URL，这里把它映射为脚本需要的 API_BASE
       API_BASE:     ${{ secrets.API_BASE_URL }}
+      # 可选：同时保留原名，方便其他脚本复用
       API_BASE_URL: ${{ secrets.API_BASE_URL }}
 
-      # DB 连接
+      # DB 连接（都来自 Secrets）
       DB_HOST:  ${{ secrets.DB_HOST }}
       DB_PORT:  ${{ secrets.DB_PORT }}
       DB_USER:  ${{ secrets.DB_USER }}
@@ -35,7 +37,7 @@ jobs:
       DB_NAME:  ${{ secrets.DB_NAME }}
       DB_TABLE: ${{ secrets.DB_TABLE }}
 
-      # 日期
+      # 手动触发时覆盖日期；脚本也兼容 DATE_STR
       DATE_OVERRIDE: ${{ inputs.DATE_OVERRIDE }}
       DATE_STR:      ${{ inputs.DATE_OVERRIDE }}
 
