@@ -2,18 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-一条龙脚本（适合 GitHub Actions）：
-1. 从接口拉取指定日期的数据，写入 xingxiu_daily
-2. 将指定日期的 xingxiu_daily 与 xingxiu_device_info 合并，写入 xingxiu_daily_report
-
-日期优先级：
-1. 环境变量 TARGET_DATE 或 XINGXIU_TARGET_DATE（YYYY-MM-DD）
-2. 命令行参数：python sync_xingxiu_daily_and_report.py 2025-11-04
-3. 都没有时，默认使用“雅加达时区的昨天”
+本地一条龙脚本：
+1. 从接口拉取指定日期 (FIXED_DATE) 的数据，写入 xingxiu_daily
+2. 再将指定日期的数据与 xingxiu_device_info 合并，写入 xingxiu_daily_report
 """
 
 import datetime as dt
-import os
 import sys
 import time
 from typing import Any, Dict, List
@@ -23,32 +17,30 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ===== 配置（环境变量优先，避免在 GitHub 里写死密码） =====
+# ===== 配置（按需修改） =====
+BASE_URL = "http://119.47.88.14:81/admin/common/mechanical/ai_export"
 
-# 接口地址
-BASE_URL = os.getenv(
-    "XINGXIU_BASE_URL",
-    "http://119.47.88.14:81/admin/common/mechanical/ai_export",
-)
-
-# 数据库配置（在 GitHub Secrets 里配置）
-DB_HOST = os.getenv("XINGXIU_DB_HOST", "rm-k1a5w7qk9cnm74r25wo.mysql.ap-southeast-5.rds.aliyuncs.com")
+DB_HOST = "rm-k1a5w7qk9cnm74r25wo.mysql.ap-southeast-5.rds.aliyuncs.com"
 DB_PORT = 3306
-DB_USER = os.getenv("XINGXIU_DB_USER", "script_xingxiu")
-DB_PASS = os.getenv("XINGXIU_DB_PASS", "")
-DB_NAME = os.getenv("XINGXIU_DB_NAME", "xingxiu_db")
+DB_USER = "script_xingxiu"
+DB_PASS = "Julong678678678"
+DB_NAME = "xingxiu_db"
 
-DAILY_TABLE  = os.getenv("XINGXIU_DAILY_TABLE", "xingxiu_daily")
-DEVICE_TABLE = os.getenv("XINGXIU_DEVICE_TABLE", "xingxiu_device_info")
-REPORT_TABLE = os.getenv("XINGXIU_REPORT_TABLE", "xingxiu_daily_report")
+DAILY_TABLE  = "xingxiu_daily"
+DEVICE_TABLE = "xingxiu_device_info"
+REPORT_TABLE = "xingxiu_daily_report"
 
-# ===== 字段映射配置（写 daily 表用） =====
+# 固定日期（改这里即可）
+FIXED_DATE = "2025-11-04"   # 注意补零，用 YYYY-MM-DD 格式
+# ==========================
+
+# ===== 公共字段映射配置（给 daily 表用） =====
 COLUMN_ORDER = [
-    "DEVICE_NO", "PROJECT_NAME", "MECHANICAL_NO",
-    "TYPE_NAME", "CAR_TYPE", "RENT_TYPE",
-    "VALID_DURATION", "IDLING_DURATION", "DAY_OIL", "DAY_REFUEL", "DAY_MILEAGE", "VALID_PERCENT",
-    "WORKHOUR_AVG_OIL", "TRANSPORT_AVG_OIL",
-    "DATE_STR", "CREATE_TIME",
+    "DEVICE_NO","PROJECT_NAME","MECHANICAL_NO",
+    "TYPE_NAME","CAR_TYPE","RENT_TYPE",
+    "VALID_DURATION","IDLING_DURATION","DAY_OIL","DAY_REFUEL","DAY_MILEAGE","VALID_PERCENT",
+    "WORKHOUR_AVG_OIL","TRANSPORT_AVG_OIL",
+    "DATE_STR","CREATE_TIME"
 ]
 
 FIELD_MAP = {
@@ -68,42 +60,9 @@ FIELD_MAP = {
     "transportAvgOil": "TRANSPORT_AVG_OIL",
 }
 
-# ===== 解析目标日期 =====
-def resolve_target_date() -> str:
-    """
-    目标日期优先级：
-    1. 环境变量 TARGET_DATE / XINGXIU_TARGET_DATE
-    2. 命令行参数
-    3. 雅加达昨天
-    """
-    env_date = os.getenv("TARGET_DATE") or os.getenv("XINGXIU_TARGET_DATE")
-    if env_date:
-        try:
-            dt.datetime.strptime(env_date, "%Y-%m-%d")
-            print(f"[INFO] 使用环境变量中的日期: {env_date}")
-            return env_date
-        except ValueError:
-            print(f"[WARN] 环境变量日期格式错误: {env_date}，应为 YYYY-MM-DD，忽略该值。")
-
-    if len(sys.argv) >= 2:
-        cli_date = sys.argv[1]
-        try:
-            dt.datetime.strptime(cli_date, "%Y-%m-%d")
-            print(f"[INFO] 使用命令行参数中的日期: {cli_date}")
-            return cli_date
-        except ValueError:
-            print(f"[WARN] 命令行日期格式错误: {cli_date}，应为 YYYY-MM-DD，忽略该值。")
-
-    jkt_tz = dt.timezone(dt.timedelta(hours=7))
-    today_jkt = dt.datetime.now(tz=jkt_tz).date()
-    target = today_jkt - dt.timedelta(days=1)
-    auto_date = target.strftime("%Y-%m-%d")
-    print(f"[INFO] 未指定日期，自动使用雅加达昨天: {auto_date}")
-    return auto_date
-
-# ===== HTTP：从接口拉数据 =====
+# ===== HTTP 部分：从接口拉数据 =====
 def make_session() -> requests.Session:
-    """带重试的 Session"""
+    """带重试的 Session：对超时/连接错误等进行重试"""
     session = requests.Session()
     retry = Retry(
         total=5,
@@ -111,7 +70,7 @@ def make_session() -> requests.Session:
         read=5,
         backoff_factor=1.5,
         status_forcelist=(502, 503, 504),
-        allowed_methods=frozenset(["POST"]),
+        allowed_methods=frozenset(["POST"])
     )
     adapter = HTTPAdapter(max_retries=retry, pool_maxsize=10)
     session.mount("http://", adapter)
@@ -122,12 +81,12 @@ def make_session() -> requests.Session:
 def fetch_data(date_str: str) -> List[Dict[str, Any]]:
     url = f"{BASE_URL}?dateStr={date_str}"
     session = make_session()
-    timeout = (10, 120)
+    timeout = (10, 120)  # (连接超时, 读取超时)
 
     for attempt in range(1, 6):
         try:
             print(f"[INFO] 第{attempt}次请求: {url}")
-            print(f"[INFO] 正在向接口发送 POST 请求，超时=连接{timeout[0]}秒, 读取{timeout[1]}秒")
+            print(f"[INFO] 正在向接口发送 POST 请求，超时设置=连接{timeout[0]}秒, 读取{timeout[1]}秒...")
 
             start_time = dt.datetime.now()
             resp = session.post(url, timeout=timeout)
@@ -157,7 +116,7 @@ def to_db_record(src: Dict[str, Any], date_str: str) -> Dict[str, Any]:
     for k, v in src.items():
         if k in FIELD_MAP:
             val = v if v != "" else None
-            if FIELD_MAP[k] == "WORKHOUR_AVG_OIL" and val is None:
+            if FIELD_MAP[k] == "WORKHOUR_AVG_OIL" and (val is None):
                 val = -1
             dst[FIELD_MAP[k]] = val
     dst["DATE_STR"] = date_str
@@ -165,6 +124,7 @@ def to_db_record(src: Dict[str, Any], date_str: str) -> Dict[str, Any]:
     return dst
 
 def upsert_daily(conn, records: List[Dict[str, Any]]) -> int:
+    """写入/更新到 xingxiu_daily 表"""
     if not records:
         return 0
     print(f"[INFO] 正在写入 {DAILY_TABLE}，共 {len(records)} 条数据...")
@@ -173,7 +133,7 @@ def upsert_daily(conn, records: List[Dict[str, Any]]) -> int:
         col_list = ", ".join(f"`{c}`" for c in cols)
         placeholders = ", ".join(["%s"] * len(cols))
         update_list = ", ".join(
-            [f"`{c}`=VALUES(`{c}`)" for c in cols if c not in ("DEVICE_NO", "DATE_STR")]
+            [f"`{c}`=VALUES(`{c}`)" for c in cols if c not in ("DEVICE_NO","DATE_STR")]
         )
         sql = (
             f"INSERT INTO `{DAILY_TABLE}` ({col_list}) VALUES ({placeholders}) "
@@ -184,9 +144,9 @@ def upsert_daily(conn, records: List[Dict[str, Any]]) -> int:
     print(f"[INFO] {DAILY_TABLE} 写入完成，受影响行数={affected}")
     return affected
 
-# ===== merge：daily + device → report =====
+# ===== merge 部分：daily + device → report =====
 def first_existing_col(cur, table: str, candidates: list[str]) -> str:
-    """返回 table 中第一个存在的列名（大小写不敏感）"""
+    """返回 table 中第一个存在的列名（大小写不敏感）；若都不存在则抛错。"""
     cur.execute(f"SHOW COLUMNS FROM `{table}`")
     cols = {row[0].upper() for row in cur.fetchall()}
     for c in candidates:
@@ -195,15 +155,21 @@ def first_existing_col(cur, table: str, candidates: list[str]) -> str:
     raise RuntimeError(f"表 `{table}` 缺少列：" + " / ".join(candidates))
 
 def merge_daily_to_report(conn, target_date: str) -> int:
+    """
+    将指定日期的日表数据与设备表合并写入业务表：
+    - 目标表：xingxiu_daily_report
+    - 唯一键：(DEVICE_ID, DATE_STR)，存在则更新
+    """
     with conn.cursor() as cur:
+        # 探测关键列名
         daily_device_col = first_existing_col(cur, DAILY_TABLE, ["DEVICE_NO", "DEVICE_ID"])
-        daily_idle_col   = first_existing_col(cur, DAILY_TABLE, ["IDLING_DURATION", "IDING_DURATION"])
+        daily_idle_col   = first_existing_col(cur, DAILY_TABLE,  ["IDLING_DURATION", "IDING_DURATION"])
         report_idle_col  = first_existing_col(cur, REPORT_TABLE, ["IDLING_DURATION", "IDING_DURATION"])
 
         print(f"[INFO] 日表设备列：{DAILY_TABLE}.{daily_device_col}")
         print(f"[INFO] 怠速列：{DAILY_TABLE}.{daily_idle_col} -> {REPORT_TABLE}.{report_idle_col}")
 
-        # 确保唯一索引
+        # 确保唯一索引 (DEVICE_ID, DATE_STR)
         cur.execute(f"SHOW INDEX FROM `{REPORT_TABLE}` WHERE Key_name='uniq_device_date'")
         if not cur.fetchone():
             cur.execute(
@@ -214,14 +180,17 @@ def merge_daily_to_report(conn, target_date: str) -> int:
 
         upsert_sql = f"""
             INSERT INTO `{REPORT_TABLE}` (
+                -- 日表字段
                 DEVICE_ID, PROJECT_NAME, MECHANICAL_NO, CAR_TYPE, DATE_STR, RENT_TYPE,
                 VALID_DURATION, {report_idle_col}, VALID_PERCENT, DAY_OIL, DAY_REFUEL,
                 DAY_MILEAGE, WORKHOUR_AVG_OIL, TRANSPORT_AVG_OIL,
 
+                -- 设备表字段
                 COMPANY, ESTATE, MACHINE_TYPE, MACHINE_CATEGORY, MACHINE_NO,
                 BRAND_SPEC, ORDER_NO, PURCHASE_DATE, DRIVER_COUNT, CREATE_TIME,
                 PURCH_PRICE, FUEL_DIFF,
 
+                -- 系统字段
                 INSERT_TIME
             )
             SELECT
@@ -239,6 +208,7 @@ def merge_daily_to_report(conn, target_date: str) -> int:
                    ON e.DEVICE_ID = d.{daily_device_col}
             WHERE d.DATE_STR = %s
             ON DUPLICATE KEY UPDATE
+                -- 覆盖日表字段
                 PROJECT_NAME       = VALUES(PROJECT_NAME),
                 MECHANICAL_NO      = VALUES(MECHANICAL_NO),
                 CAR_TYPE           = VALUES(CAR_TYPE),
@@ -252,6 +222,7 @@ def merge_daily_to_report(conn, target_date: str) -> int:
                 WORKHOUR_AVG_OIL   = VALUES(WORKHOUR_AVG_OIL),
                 TRANSPORT_AVG_OIL  = VALUES(TRANSPORT_AVG_OIL),
 
+                -- 覆盖设备表字段
                 COMPANY            = VALUES(COMPANY),
                 ESTATE             = VALUES(ESTATE),
                 MACHINE_TYPE       = VALUES(MACHINE_TYPE),
@@ -265,6 +236,7 @@ def merge_daily_to_report(conn, target_date: str) -> int:
                 PURCH_PRICE        = VALUES(PURCH_PRICE),
                 FUEL_DIFF          = VALUES(FUEL_DIFF),
 
+                -- 合并时间刷新
                 INSERT_TIME        = NOW()
         """
 
@@ -275,9 +247,10 @@ def merge_daily_to_report(conn, target_date: str) -> int:
 
 # ===== 主流程 =====
 def main():
-    date_str = resolve_target_date()
+    date_str = FIXED_DATE
     print(f"[INFO] 开始任务，目标日期: {date_str}")
 
+    # 1. 先拉接口数据并写入 daily 表
     rows = fetch_data(date_str)
     if not rows:
         print("[WARN] 接口返回无数据/失败，跳过写入与合并。")
@@ -292,12 +265,15 @@ def main():
         password=DB_PASS,
         database=DB_NAME,
         charset="utf8mb4",
-        autocommit=False,
+        autocommit=False
     )
 
     try:
         upsert_daily(conn, db_rows)
+
+        # 2. 再把 daily + device 合并到 report
         merge_daily_to_report(conn, date_str)
+
         conn.commit()
         print("[INFO] 全流程成功完成。")
     except Exception as e:
