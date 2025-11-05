@@ -33,7 +33,7 @@ BASE_URL = os.getenv(
 
 # 数据库配置（在 GitHub Secrets 里配置）
 DB_HOST = os.getenv("XINGXIU_DB_HOST", "rm-k1a5w7qk9cnm74r25wo.mysql.ap-southeast-5.rds.aliyuncs.com")
-DB_PORT = int(os.getenv("XINGXIU_DB_PORT", "3306"))
+DB_PORT = 3306
 DB_USER = os.getenv("XINGXIU_DB_USER", "script_xingxiu")
 DB_PASS = os.getenv("XINGXIU_DB_PASS", "")
 DB_NAME = os.getenv("XINGXIU_DB_NAME", "xingxiu_db")
