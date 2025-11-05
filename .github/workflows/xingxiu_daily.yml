@@ -1,97 +1,42 @@
-name: Daily Sync (Jakarta 02:00)
+name: Xingxiu Daily Sync
 
 on:
   schedule:
-    - cron: "0 19 * * *"   # 02:00 Asia/Jakarta
+    # 每天 JKT 01:30（UTC+7）运行，对应 UTC 18:30
+    - cron: '30 18 * * *'
   workflow_dispatch:
     inputs:
-      date:
-        description: "Target date (YYYY-MM-DD) in Asia/Jakarta; leave empty to use JKT 'yesterday'"
+      target_date:
+        description: '指定日期 YYYY-MM-DD（留空则用雅加达昨天）'
         required: false
         type: string
-        default: ""
-
-permissions:
-  contents: read
-
-concurrency:
-  group: daily-sync
-  cancel-in-progress: false
 
 jobs:
-  run:
+  sync-daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 40  # 防止长时间挂起
-
-    env:
-      TZ: Asia/Jakarta
-      DATE_STR: ${{ github.event.inputs.date }}
-
-      DEVICE_TABLE: xingxiu_device_info
-      DAILY_TABLE:  xingxiu_daily
-      REPORT_TABLE: xingxiu_daily_report
-
-      DB_HOST: ${{ secrets.DB_HOST }}
-      DB_PORT: ${{ secrets.DB_PORT }}
-      DB_USER: ${{ secrets.DB_USER }}
-      DB_PASS: ${{ secrets.DB_PASS }}
-      DB_NAME: ${{ secrets.DB_NAME }}
-
-      API_BASE:     ${{ secrets.API_BASE_URL }}
-      API_BASE_URL: ${{ secrets.API_BASE_URL }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Resolve DATE_STR (default to JKT yesterday)
-        run: |
-          if [ -z "${DATE_STR}" ]; then
-            YDAY=$(date -d "TZ=\"${TZ}\" yesterday" +%F 2>/dev/null || true)
-            # macOS fallback syntax（虽然这里是 ubuntu，但留着更稳）
-            if [ -z "$YDAY" ]; then YDAY=$(TZ="${TZ}" date -v-1d +%F); fi
-            echo "DATE_STR=$YDAY" >> "$GITHUB_ENV"
-            echo "Resolved DATE_STR=$YDAY"
-          else
-            echo "DATE_STR=${DATE_STR}" >> "$GITHUB_ENV"
-            echo "Using provided DATE_STR=${DATE_STR}"
-          fi
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run sync_xingxiu_daily_and_report
         env:
-          PIP_DISABLE_PIP_VERSION_CHECK: "1"
-
-      - name: Fetch daily data into DB
+          XINGXIU_DB_HOST: ${{ secrets.XINGXIU_DB_HOST }}
+          XINGXIU_DB_PORT: ${{ secrets.XINGXIU_DB_PORT }}
+          XINGXIU_DB_USER: ${{ secrets.XINGXIU_DB_USER }}
+          XINGXIU_DB_PASS: ${{ secrets.XINGXIU_DB_PASS }}
+          XINGXIU_DB_NAME: ${{ secrets.XINGXIU_DB_NAME }}
+          XINGXIU_BASE_URL: ${{ secrets.XINGXIU_BASE_URL }}
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
         run: |
-          python -X utf8 daily_sync/fetch_and_store_daily.py 2>&1 | tee fetch_daily.log
-
-      - name: Merge daily into business report
-        run: |
-          python -X utf8 daily_sync/merge_daily_to_report_upsert.py 2>&1 | tee merge_daily.log
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: daily-sync-logs
-          path: |
-            fetch_daily.log
-            merge_daily.log
-          if-no-files-found: warn
-          retention-days: 7
-
-      # 可选：网络诊断（只在失败时执行，帮你判断是 81 端口/出站受限）
-      - name: Post-mortem net diag
-        if: failure()
-        run: |
-          set -x
-          which traceroute || sudo apt-get update && sudo apt-get install -y traceroute
-          traceroute -n "$(echo "$API_BASE" | sed -E 's#https?://([^/:]+).*#\1#')"
-          curl -I --connect-timeout 5 --max-time 10 https://example.com || true
+          python daily_sync/sync_xingxiu_daily_and_report.py
