@@ -7,6 +7,7 @@
 2. 再将指定日期的数据与 xingxiu_device_info 合并，写入 xingxiu_daily_report
 """
 
+import os
 import datetime as dt
 import sys
 import time
@@ -31,7 +32,16 @@ DEVICE_TABLE = "xingxiu_device_info"
 REPORT_TABLE = "xingxiu_daily_report"
 
 # 固定日期（改这里即可）
-FIXED_DATE = "2025-11-04"   # 注意补零，用 YYYY-MM-DD 格式
+# 逻辑：
+# 1. 如果环境变量 TARGET_DATE 有值（Action 手动填写），就用它
+# 2. 否则，用运行时间当天的前一天
+env_target_date = os.getenv("TARGET_DATE", "").strip()
+if env_target_date:
+    FIXED_DATE = env_target_date
+    print(f"[INFO] 使用环境变量 TARGET_DATE 作为日期: {FIXED_DATE}")
+else:
+    FIXED_DATE = (dt.date.today() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+    print(f"[INFO] 未指定 TARGET_DATE，使用运行时间前一天: {FIXED_DATE}")
 # ==========================
 
 # ===== 公共字段映射配置（给 daily 表用） =====
