@@ -31,12 +31,19 @@ jobs:
 
       - name: Run sync_xingxiu_daily_and_report
         env:
-          XINGXIU_DB_HOST: ${{ secrets.XINGXIU_DB_HOST }}
-          XINGXIU_DB_PORT: ${{ secrets.XINGXIU_DB_PORT }}
-          XINGXIU_DB_USER: ${{ secrets.XINGXIU_DB_USER }}
-          XINGXIU_DB_PASS: ${{ secrets.XINGXIU_DB_PASS }}
-          XINGXIU_DB_NAME: ${{ secrets.XINGXIU_DB_NAME }}
-          XINGXIU_BASE_URL: ${{ secrets.XINGXIU_BASE_URL }}
+          # 映射真实的数据库 secrets
+          XINGXIU_DB_HOST: ${{ secrets.DB_HOST }}
+          XINGXIU_DB_PORT: ${{ secrets.DB_PORT }}
+          XINGXIU_DB_USER: ${{ secrets.DB_USER }}
+          XINGXIU_DB_PASS: ${{ secrets.DB_PASS }}
+          XINGXIU_DB_NAME: ${{ secrets.DB_NAME }}
+
+          # API 基础地址（映射 API_BASE_URL）
+          XINGXIU_BASE_URL: ${{ secrets.API_BASE_URL }}
+
+          # 传递手动输入的日期
           TARGET_DATE: ${{ github.event.inputs.target_date }}
+
         run: |
-          python daily_sync/sync_xingxiu_daily_and_report.py
+          # -u 让 python 不要缓冲日志，能即时看到输出
+          python -u daily_sync/sync_xingxiu_daily_and_report.py
