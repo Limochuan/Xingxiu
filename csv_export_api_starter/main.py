@@ -265,6 +265,9 @@ def build_columns_for_sheet(sheet_kind: str) -> List[Tuple[str,str,list]]:
       - 隐藏字段：
          * Sedang 隐藏：MECHANICAL_NO, VALID_DURATION, IDLING_DURATION, VALID_PERCENT, WORKHOUR_AVG_OIL
          * Berat  隐藏：MECHANICAL_NO, DAY_MILEAGE, TRANSPORT_AVG_OIL
+      - 单位：
+         * Sedang 子表：TRANSPORT_AVG_OIL → 运输平均油耗(KM/L)，FUEL_DIFF → 标准油耗差(KM/L)
+         * Berat  子表：WORKHOUR_AVG_OIL → 工时平均油耗(L/HM)，FUEL_DIFF → 标准油耗差(L/HM)
     """
     hidden_sedang = {
         "MECHANICAL_NO", "VALID_DURATION", "IDLING_DURATION",
@@ -278,9 +281,9 @@ def build_columns_for_sheet(sheet_kind: str) -> List[Tuple[str,str,list]]:
     head_order = ["RANK_TODAY", "MACHINE_NO", "SCORE", "SUMMARY"]
 
     # 映射方便查
-    spec_map = {en: spec for en, zh, alts in COLUMN_SPECS for spec in [(en, zh, alts)]}
+    spec_map = {en: (en, zh, alts) for en, zh, alts in COLUMN_SPECS}
     # 先放头部
-    chosen = []
+    chosen: List[Tuple[str,str,list]] = []
     used = set()
     for key in head_order:
         if key in hidden:
@@ -296,7 +299,22 @@ def build_columns_for_sheet(sheet_kind: str) -> List[Tuple[str,str,list]]:
         chosen.append((en, zh, alts))
         used.add(en)
 
-    return chosen
+    # 按子表类型调整单位
+    adjusted: List[Tuple[str,str,list]] = []
+    for en, zh, alts in chosen:
+        if sheet_kind == "sedang":
+            if en == "TRANSPORT_AVG_OIL":
+                zh = "运输平均油耗(KM/L)"
+            elif en == "FUEL_DIFF":
+                zh = "标准油耗差(KM/L)"
+        else:  # berat
+            if en == "WORKHOUR_AVG_OIL":
+                zh = "工时平均油耗(L/HM)"
+            elif en == "FUEL_DIFF":
+                zh = "标准油耗差(L/HM)"
+        adjusted.append((en, zh, alts))
+
+    return adjusted
 
 def col_widths_for_specs(ncols: int) -> List[float]:
     # 第一列“当日排名”稍窄，其余统一宽度
