@@ -15,10 +15,10 @@ on:
         type: string
         default: ""
       project:
-        description: "PROJECT_FILTER (default: Kalteng GIJ 中加一园)"
+        description: "PROJECT_FILTER (comma separated)"
         required: false
         type: string
-        default: "Kalteng GIJ 中加一园"
+        default: "Kalteng GIJ 中加一园,Kalteng ASP 中加七园"
 
 permissions:
   contents: read
@@ -83,7 +83,9 @@ jobs:
             echo "Using TARGET_DATE=${DATE_STR}"
           fi
 
-          echo "PROJECT_FILTER=${PROJECT_FILTER_INPUT:-Kalteng GIJ 中加一园}" >> "$GITHUB_ENV"
+          # 支持多个园区（英文逗号分隔）
+          echo "PROJECT_FILTER=${PROJECT_FILTER_INPUT:-Kalteng GIJ 中加一园,Kalteng ASP 中加七园}" >> "$GITHUB_ENV"
+          echo "PROJECT_FILTER=${PROJECT_FILTER}"
 
       - name: Install dependencies
         run: |
