@@ -1,9 +1,12 @@
-name: AI Analyze Daily Report (JKT 02:30)
+name: AI Analyze Daily Report (JKT 02:30 & 20:30)
 
 on:
   schedule:
-    # 02:30 Asia/Jakarta == 19:30 UTC（前一日）
+    # JKT 02:30 == 19:30 UTC（前一日）
     - cron: "30 19 * * *"
+    # JKT 20:30 == 13:30 UTC
+    - cron: "30 13 * * *"
+
   workflow_dispatch:
     inputs:
       date:
@@ -36,22 +39,22 @@ jobs:
       DATE_STR: ${{ github.event.inputs.date }}
       PROJECT_FILTER_INPUT: ${{ github.event.inputs.project }}
 
-      # 业务表名（如需改名，在这里改）
+      # 业务表名
       REPORT_TABLE: xingxiu_daily_report
 
-      # 数据库凭据（从 Secrets 注入）
+      # 数据库凭据
       DB_HOST: ${{ secrets.DB_HOST }}
       DB_PORT: ${{ secrets.DB_PORT }}
       DB_USER: ${{ secrets.DB_USER }}
       DB_PASS: ${{ secrets.DB_PASS }}
       DB_NAME: ${{ secrets.DB_NAME }}
 
-      # OpenAI / 代理（从 Secrets 注入）
+      # OpenAI / 代理
       OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}
       OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
       OPENAI_MODEL:    ${{ secrets.OPENAI_MODEL }}
 
-      # 并发/超时/批量
+      # 并发 / 超时 / 批量
       MAX_WORKERS: "8"
       OPENAI_TIMEOUT: "60"
       OPENAI_RETRIES: "2"
@@ -69,8 +72,10 @@ jobs:
         shell: bash
         run: |
           if [ -z "${DATE_STR}" ]; then
-            YDAY=$(date -d "TZ=\"${TZ}\" yesterday" +%F 2>/dev/null || true)
-            if [ -z "$YDAY" ]; then YDAY=$(TZ="${TZ}" date -v-1d +%F); fi
+            YDAY=$(TZ="${TZ}" date -d "yesterday" +%F 2>/dev/null || true)
+            if [ -z "$YDAY" ]; then
+              YDAY=$(TZ="${TZ}" date -v-1d +%F)
+            fi
             echo "TARGET_DATE=$YDAY" >> "$GITHUB_ENV"
             echo "Resolved TARGET_DATE=$YDAY"
           else
@@ -78,11 +83,7 @@ jobs:
             echo "Using TARGET_DATE=${DATE_STR}"
           fi
 
-          if [ -z "${PROJECT_FILTER_INPUT}" ]; then
-            echo "PROJECT_FILTER=Kalteng GIJ 中加一园" >> "$GITHUB_ENV"
-          else
-            echo "PROJECT_FILTER=${PROJECT_FILTER_INPUT}" >> "$GITHUB_ENV"
-          fi
+          echo "PROJECT_FILTER=${PROJECT_FILTER_INPUT:-Kalteng GIJ 中加一园}" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: |
