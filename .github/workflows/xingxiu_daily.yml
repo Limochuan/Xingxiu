@@ -2,8 +2,16 @@ name: Xingxiu Daily Sync
 
 on:
   schedule:
-    # 每天 JKT 01:30（UTC+7）运行，对应 UTC 18:30
+    # 每天雅加达时间（UTC+7）运行
+    # JKT 01:30
     - cron: '30 18 * * *'
+    # JKT 04:30
+    - cron: '30 21 * * *'
+    # JKT 14:30
+    - cron: '30 7 * * *'
+    # JKT 18:30
+    - cron: '30 11 * * *'
+
   workflow_dispatch:
     inputs:
       target_date:
@@ -31,19 +39,19 @@ jobs:
 
       - name: Run sync_xingxiu_daily_and_report
         env:
-          # 映射真实的数据库 secrets
+          # 数据库连接
           XINGXIU_DB_HOST: ${{ secrets.DB_HOST }}
           XINGXIU_DB_PORT: ${{ secrets.DB_PORT }}
           XINGXIU_DB_USER: ${{ secrets.DB_USER }}
           XINGXIU_DB_PASS: ${{ secrets.DB_PASS }}
           XINGXIU_DB_NAME: ${{ secrets.DB_NAME }}
 
-          # API 基础地址（映射 API_BASE_URL）
+          # API 基础地址
           XINGXIU_BASE_URL: ${{ secrets.API_BASE_URL }}
 
-          # 传递手动输入的日期
+          # 手动触发时可传日期
           TARGET_DATE: ${{ github.event.inputs.target_date }}
 
         run: |
-          # -u 让 python 不要缓冲日志，能即时看到输出
+          # -u 关闭 python 输出缓冲，方便看日志
           python -u daily_sync/sync_xingxiu_daily_and_report.py
