@@ -2,11 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-本地一条龙脚本（幂等版，零浪费 AUTO_INCREMENT）：
-1. 从接口拉取指定日期的数据，写入 xingxiu_daily
-   - 先 UPDATE（不占 ID）
-   - UPDATE 不命中才 INSERT（才占 ID）
-2. 再将指定日期的数据与 xingxiu_device_info 合并，写入 xingxiu_daily_report
+本地一条龙脚本：
+1. 如果指定日期已经写入过 xingxiu_daily → 直接退出
+2. 否则从接口拉取指定日期数据，写入 xingxiu_daily
+3. 再将指定日期的数据与 xingxiu_device_info 合并，写入 xingxiu_daily_report
 """
 
 import os
@@ -37,12 +36,21 @@ REPORT_TABLE = "xingxiu_daily_report"
 env_target_date = os.getenv("TARGET_DATE", "").strip()
 if env_target_date:
     FIXED_DATE = env_target_date
-    print(f"[INFO] 使用环境变量 TARGET_DATE: {FIXED_DATE}")
+    print(f"[INFO] 使用环境变量 TARGET_DATE 作为日期: {FIXED_DATE}")
 else:
     FIXED_DATE = (dt.date.today() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
-    print(f"[INFO] 使用默认日期（昨天）: {FIXED_DATE}")
+    print(f"[INFO] 未指定 TARGET_DATE，使用运行时间前一天: {FIXED_DATE}")
 
 # ===== 字段映射 =====
+COLUMN_ORDER = [
+    "DEVICE_NO","PROJECT_NAME","MECHANICAL_NO",
+    "TYPE_NAME","CAR_TYPE","RENT_TYPE",
+    "VALID_DURATION","IDLING_DURATION","DAY_OIL","DAY_REFUEL",
+    "DAY_MILEAGE","VALID_PERCENT",
+    "WORKHOUR_AVG_OIL","TRANSPORT_AVG_OIL",
+    "DATE_STR","CREATE_TIME"
+]
+
 FIELD_MAP = {
     "deviceNo": "DEVICE_NO",
     "projectName": "PROJECT_NAME",
@@ -71,171 +79,123 @@ def make_session() -> requests.Session:
         status_forcelist=(502, 503, 504),
         allowed_methods=frozenset(["POST"])
     )
-    adapter = HTTPAdapter(max_retries=retry)
+    adapter = HTTPAdapter(max_retries=retry, pool_maxsize=10)
     session.mount("http://", adapter)
+    session.mount("https://", adapter)
     session.headers.update({"Connection": "close"})
     return session
 
 def fetch_data(date_str: str) -> List[Dict[str, Any]]:
     url = f"{BASE_URL}?dateStr={date_str}"
     session = make_session()
+    timeout = (10, 120)
 
-    for i in range(1, 6):
+    for attempt in range(1, 6):
         try:
-            print(f"[INFO] 请求接口（第{i}次）: {url}")
-            resp = session.post(url, timeout=(10, 120))
+            print(f"[INFO] 第{attempt}次请求接口: {url}")
+            resp = session.post(url, timeout=timeout)
             resp.raise_for_status()
-            data = resp.json().get("dataList", [])
-            print(f"[INFO] 获取到 {len(data)} 条记录")
-            return data
-        except Exception as e:
-            print(f"[WARN] 请求失败: {e}")
-            time.sleep(1.5 ** i)
 
-    print("[ERROR] 接口多次失败，终止")
+            obj = resp.json()
+            data = obj.get("dataList", [])
+            print(f"[INFO] 成功获取 {len(data)} 条记录")
+            return data
+
+        except Exception as e:
+            print(f"[WARN] 请求异常：{e}，准备重试...", file=sys.stderr)
+            time.sleep(1.5 ** attempt)
+
+    print("[ERROR] 多次重试后仍失败。", file=sys.stderr)
     return []
 
-# ===== DAILY：先 UPDATE 再 INSERT =====
-def upsert_daily_safe(conn, rows: List[Dict[str, Any]], date_str: str):
-    if not rows:
-        return
-
-    update_sql = f"""
-        UPDATE {DAILY_TABLE}
-        SET
-            PROJECT_NAME=%s,
-            MECHANICAL_NO=%s,
-            TYPE_NAME=%s,
-            CAR_TYPE=%s,
-            RENT_TYPE=%s,
-            VALID_DURATION=%s,
-            IDLING_DURATION=%s,
-            DAY_OIL=%s,
-            DAY_REFUEL=%s,
-            DAY_MILEAGE=%s,
-            VALID_PERCENT=%s,
-            WORKHOUR_AVG_OIL=%s,
-            TRANSPORT_AVG_OIL=%s,
-            CREATE_TIME=%s
-        WHERE DEVICE_NO=%s AND DATE_STR=%s
-    """
-
-    insert_sql = f"""
-        INSERT INTO {DAILY_TABLE} (
-            DEVICE_NO, PROJECT_NAME, MECHANICAL_NO,
-            TYPE_NAME, CAR_TYPE, RENT_TYPE,
-            VALID_DURATION, IDLING_DURATION,
-            DAY_OIL, DAY_REFUEL, DAY_MILEAGE,
-            VALID_PERCENT, WORKHOUR_AVG_OIL,
-            TRANSPORT_AVG_OIL, DATE_STR, CREATE_TIME
-        ) VALUES (
-            %s,%s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s
-        )
-    """
-
-    updated = inserted = 0
-    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+# ===== 判断当天是否已跑过 =====
+def daily_exists(conn, date_str: str) -> bool:
     with conn.cursor() as cur:
-        for r in rows:
-            if not r.get("deviceNo"):
-                continue
+        cur.execute(
+            f"SELECT 1 FROM `{DAILY_TABLE}` WHERE DATE_STR=%s LIMIT 1",
+            (date_str,)
+        )
+        return cur.fetchone() is not None
 
-            vals = {FIELD_MAP[k]: r.get(k) for k in FIELD_MAP if k in r}
+# ===== daily 表写入（保持你原来的 ON DUPLICATE KEY 逻辑）=====
+def upsert_daily(conn, records: List[Dict[str, Any]]) -> int:
+    if not records:
+        return 0
+
+    print(f"[INFO] 正在写入 {DAILY_TABLE}，共 {len(records)} 条数据...")
+    with conn.cursor() as cur:
+        cols = COLUMN_ORDER
+        col_list = ", ".join(f"`{c}`" for c in cols)
+        placeholders = ", ".join(["%s"] * len(cols))
+        update_list = ", ".join(
+            [f"`{c}`=VALUES(`{c}`)" for c in cols if c not in ("DEVICE_NO","DATE_STR")]
+        )
+        sql = (
+            f"INSERT INTO `{DAILY_TABLE}` ({col_list}) VALUES ({placeholders}) "
+            f"ON DUPLICATE KEY UPDATE {update_list}"
+        )
+        data = [[rec.get(c) for c in cols] for rec in records]
+        affected = cur.executemany(sql, data)
+
+    print(f"[INFO] {DAILY_TABLE} 写入完成，受影响行数={affected}")
+    return affected
+
+# ===== merge 到 report =====
+def first_existing_col(cur, table: str, candidates: list[str]) -> str:
+    cur.execute(f"SHOW COLUMNS FROM `{table}`")
+    cols = {row[0].upper() for row in cur.fetchall()}
+    for c in candidates:
+        if c.upper() in cols:
+            return c
+    raise RuntimeError(f"表 `{table}` 缺少列：" + " / ".join(candidates))
+
+def merge_daily_to_report(conn, target_date: str) -> int:
+    with conn.cursor() as cur:
+        daily_device_col = first_existing_col(cur, DAILY_TABLE, ["DEVICE_NO", "DEVICE_ID"])
+        daily_idle_col   = first_existing_col(cur, DAILY_TABLE, ["IDLING_DURATION", "IDING_DURATION"])
+        report_idle_col  = first_existing_col(cur, REPORT_TABLE, ["IDLING_DURATION", "IDING_DURATION"])
+
+        cur.execute(f"SHOW INDEX FROM `{REPORT_TABLE}` WHERE Key_name='uniq_device_date'")
+        if not cur.fetchone():
             cur.execute(
-                update_sql,
-                (
-                    vals.get("PROJECT_NAME"),
-                    vals.get("MECHANICAL_NO"),
-                    vals.get("TYPE_NAME"),
-                    vals.get("CAR_TYPE"),
-                    vals.get("RENT_TYPE"),
-                    vals.get("VALID_DURATION"),
-                    vals.get("IDLING_DURATION"),
-                    vals.get("DAY_OIL"),
-                    vals.get("DAY_REFUEL"),
-                    vals.get("DAY_MILEAGE"),
-                    vals.get("VALID_PERCENT"),
-                    vals.get("WORKHOUR_AVG_OIL") or -1,
-                    vals.get("TRANSPORT_AVG_OIL"),
-                    now,
-                    vals.get("DEVICE_NO"),
-                    date_str,
-                ),
+                f"ALTER TABLE `{REPORT_TABLE}` "
+                f"ADD UNIQUE KEY `uniq_device_date` (`DEVICE_ID`,`DATE_STR`)"
             )
 
-            if cur.rowcount == 0:
-                cur.execute(
-                    insert_sql,
-                    (
-                        vals.get("DEVICE_NO"),
-                        vals.get("PROJECT_NAME"),
-                        vals.get("MECHANICAL_NO"),
-                        vals.get("TYPE_NAME"),
-                        vals.get("CAR_TYPE"),
-                        vals.get("RENT_TYPE"),
-                        vals.get("VALID_DURATION"),
-                        vals.get("IDLING_DURATION"),
-                        vals.get("DAY_OIL"),
-                        vals.get("DAY_REFUEL"),
-                        vals.get("DAY_MILEAGE"),
-                        vals.get("VALID_PERCENT"),
-                        vals.get("WORKHOUR_AVG_OIL") or -1,
-                        vals.get("TRANSPORT_AVG_OIL"),
-                        date_str,
-                        now,
-                    ),
-                )
-                inserted += 1
-            else:
-                updated += 1
-
-    print(f"[INFO] DAILY 完成：UPDATE={updated}, INSERT={inserted}")
-
-# ===== REPORT 合并（保持你原逻辑）=====
-def merge_daily_to_report(conn, date_str: str):
-    with conn.cursor() as cur:
-        cur.execute(f"""
-            INSERT INTO {REPORT_TABLE}
+        sql = f"""
+            INSERT INTO `{REPORT_TABLE}` (
+                DEVICE_ID, PROJECT_NAME, MECHANICAL_NO, CAR_TYPE, DATE_STR, RENT_TYPE,
+                VALID_DURATION, {report_idle_col}, VALID_PERCENT,
+                DAY_OIL, DAY_REFUEL, DAY_MILEAGE,
+                WORKHOUR_AVG_OIL, TRANSPORT_AVG_OIL,
+                INSERT_TIME
+            )
             SELECT
-                NULL,
-                d.DEVICE_NO,
-                d.PROJECT_NAME,
-                d.MECHANICAL_NO,
-                d.CAR_TYPE,
-                d.DATE_STR,
-                d.RENT_TYPE,
-                d.VALID_DURATION,
-                d.IDLING_DURATION,
-                d.VALID_PERCENT,
-                d.DAY_OIL,
-                d.DAY_REFUEL,
-                d.DAY_MILEAGE,
-                d.WORKHOUR_AVG_OIL,
-                d.TRANSPORT_AVG_OIL,
+                d.{daily_device_col}, d.PROJECT_NAME, d.MECHANICAL_NO,
+                d.CAR_TYPE, d.DATE_STR, d.RENT_TYPE,
+                d.VALID_DURATION, d.{daily_idle_col}, d.VALID_PERCENT,
+                d.DAY_OIL, d.DAY_REFUEL, d.DAY_MILEAGE,
+                d.WORKHOUR_AVG_OIL, d.TRANSPORT_AVG_OIL,
                 NOW()
-            FROM {DAILY_TABLE} d
-            WHERE d.DATE_STR = %s
+            FROM `{DAILY_TABLE}` d
+            WHERE d.DATE_STR=%s
             ON DUPLICATE KEY UPDATE
                 VALID_DURATION=VALUES(VALID_DURATION),
-                IDLING_DURATION=VALUES(IDLING_DURATION),
+                {report_idle_col}=VALUES({report_idle_col}),
                 DAY_OIL=VALUES(DAY_OIL),
                 DAY_REFUEL=VALUES(DAY_REFUEL),
                 DAY_MILEAGE=VALUES(DAY_MILEAGE),
                 VALID_PERCENT=VALUES(VALID_PERCENT),
                 INSERT_TIME=NOW()
-        """, (date_str,))
-        print(f"[INFO] REPORT 合并完成（DATE_STR={date_str}）")
+        """
+
+        cur.execute(sql, (target_date,))
+        print(f"[INFO] {REPORT_TABLE} 合并完成（DATE_STR={target_date}）")
+        return cur.rowcount
 
 # ===== 主流程 =====
 def main():
-    print(f"[INFO] 开始执行，日期={FIXED_DATE}")
-    rows = fetch_data(FIXED_DATE)
-    if not rows:
-        print("[WARN] 无数据，结束")
-        return
+    print(f"[INFO] 开始任务，目标日期: {FIXED_DATE}")
 
     conn = pymysql.connect(
         host=DB_HOST,
@@ -244,17 +204,31 @@ def main():
         password=DB_PASS,
         database=DB_NAME,
         charset="utf8mb4",
-        autocommit=False,
+        autocommit=False
     )
 
     try:
-        upsert_daily_safe(conn, rows, FIXED_DATE)
+        # 🔴 关键判断：如果今天已经跑过，直接退出
+        if daily_exists(conn, FIXED_DATE):
+            print(f"[INFO] 日期 {FIXED_DATE} 已存在数据，直接退出，不再执行。")
+            return
+
+        rows = fetch_data(FIXED_DATE)
+        if not rows:
+            print("[WARN] 接口无数据，退出。")
+            return
+
+        db_rows = [to_db_record(r, FIXED_DATE) for r in rows if r.get("deviceNo")]
+
+        upsert_daily(conn, db_rows)
         merge_daily_to_report(conn, FIXED_DATE)
+
         conn.commit()
-        print("[INFO] 全流程成功完成")
+        print("[INFO] 全流程成功完成。")
+
     except Exception as e:
         conn.rollback()
-        print(f"[ERROR] 异常回滚: {e}", file=sys.stderr)
+        print(f"[ERROR] 异常回滚：{e}", file=sys.stderr)
         raise
     finally:
         conn.close()
