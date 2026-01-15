@@ -32,7 +32,7 @@ FONT_BODY_NAME  = "仿宋"
 REDIRECT_BEFORE_CUTOFF = os.getenv("REDIRECT_BEFORE_CUTOFF", "http://www.info.julongairoxy.com/")
 REDIRECT_TODAY_FUTURE  = os.getenv("REDIRECT_TODAY_FUTURE",  "http://www.info2.julongairoxy.com/")
 REDIRECT_OTHER_ERROR   = os.getenv("REDIRECT_OTHER_ERROR",   "http://www.info1.julongairoxy.com/")
-CUTOFF_DATE_STR = os.getenv("CUTOFF_DATE", "2025-09-01")
+CUTOFF_DATE_STR = os.getenv("CUTOFF_DATE", "2026-01-01")
 CUTOFF_DATE = dt.datetime.strptime(CUTOFF_DATE_STR, "%Y-%m-%d").date()
 
 # 支持的项目名白名单（用于智能匹配）
